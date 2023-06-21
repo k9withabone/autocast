@@ -8,7 +8,7 @@ use std::{
     time::SystemTime,
 };
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use color_eyre::eyre;
 use serde::Deserialize;
 use thiserror::Error;
@@ -67,11 +67,14 @@ impl TryFrom<Script> for asciicast::File {
             env.entry(env_var)
                 .or_insert_with_key(|key| std::env::var(key).unwrap_or_default());
         }
-        env.insert(String::from("SHELL"), shell.program);
+        let shell_env = match &shell {
+            Shell::Bash => "bash",
+            Shell::Python => "python",
+            Shell::Custom { program, .. } => program,
+        };
+        env.insert(String::from("SHELL"), String::from(shell_env));
 
         todo!("run instructions to get events");
-
-        let command = (!shell.is_default_bash()).then_some(shell.to_string());
 
         Ok(Self {
             header: asciicast::Header {
@@ -80,7 +83,7 @@ impl TryFrom<Script> for asciicast::File {
                 timestamp: Some(SystemTime::now()),
                 duration: None,
                 idle_time_limit: None,
-                command,
+                command: None,
                 title,
                 env,
             },
@@ -114,6 +117,8 @@ pub struct Settings {
     ///
     /// Will be listed in the asciicast's "env" header section as "SHELL"
     /// and in the "command" section
+    ///
+    /// To use a custom shell it must be specified in the input file
     #[arg(long, default_value_t)]
     #[serde(default)]
     shell: Shell,
@@ -215,49 +220,39 @@ impl Merge for Settings {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-struct Shell {
-    program: String,
-    #[serde(default)]
-    args: Vec<String>,
-}
-
-impl FromStr for Shell {
-    type Err = ParseShellError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Err(ParseShellError::Empty);
-        }
-        let mut args = shlex::split(s).ok_or(ParseShellError::Split)?;
-        let program = args.remove(0);
-        Ok(Self { program, args })
-    }
-}
-
-#[derive(Error, Debug)]
-enum ParseShellError {
-    #[error("shell cannot be empty")]
-    Empty,
-    #[error("could not successfully split shell command into args")]
-    Split,
+#[derive(Deserialize, ValueEnum, Debug, Clone, PartialEq)]
+enum Shell {
+    Bash,
+    Python,
+    #[value(skip)]
+    Custom {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        prompt: String,
+        #[serde(default)]
+        quit_command: Option<String>,
+        #[serde(default)]
+        echo_on: bool,
+    },
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self {
-            program: String::from("bash"),
-            args: Vec::new(),
-        }
+        Self::Bash
     }
 }
 
 impl Display for Shell {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let command = iter::once(&self.program)
-            .chain(&self.args)
-            .map(String::as_str);
-        f.write_str(&shlex::join(command))
+        match self {
+            Self::Bash => f.write_str("bash"),
+            Self::Python => f.write_str("python"),
+            Self::Custom { program, args, .. } => {
+                let command = iter::once(program).chain(args).map(String::as_str);
+                f.write_str(&shlex::join(command))
+            }
+        }
     }
 }
 
@@ -266,18 +261,6 @@ impl Merge for Shell {
         if other != Self::default() {
             *self = other;
         }
-    }
-}
-
-impl Shell {
-    fn is_default_bash(&self) -> bool {
-        self.args.is_empty()
-            && self
-                .program
-                .split('/')
-                .last()
-                .expect("split has at least one element")
-                == "bash"
     }
 }
 
@@ -428,50 +411,5 @@ impl<T> Merge for Option<T> {
 impl<T> Merge for Vec<T> {
     fn merge(&mut self, other: Self) {
         self.extend(other);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shell_is_default_bash() {
-        assert!(
-            Shell::default().is_default_bash(),
-            "Shell default is not bash"
-        );
-        assert!(
-            Shell {
-                program: String::from("/usr/bin/bash"),
-                args: Vec::new()
-            }
-            .is_default_bash(),
-            "`/usr/bin/bash` not detected as bash"
-        );
-        assert!(
-            Shell {
-                program: String::from("/bin/bash"),
-                args: Vec::new()
-            }
-            .is_default_bash(),
-            "`/bin/bash` not detected as bash"
-        );
-        assert!(
-            !Shell {
-                program: String::from("fish"),
-                args: Vec::new()
-            }
-            .is_default_bash(),
-            "`fish` detected as bash"
-        );
-        assert!(
-            !Shell {
-                program: String::from("bash"),
-                args: vec![String::from("--rcfile"), String::from("file")]
-            }
-            .is_default_bash(),
-            "`bash --rcfile file` detected as default bash"
-        );
     }
 }
