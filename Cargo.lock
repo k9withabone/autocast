@@ -86,6 +86,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
+ "tempfile",
  "terminal_size",
  "thiserror",
 ]

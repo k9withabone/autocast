@@ -1,16 +1,20 @@
 use std::{
     collections::HashMap,
+    ffi::OsStr,
     fmt::{self, Display},
-    io::Read,
+    io::{Read, Write},
     iter,
     num::ParseIntError,
+    process,
     str::FromStr,
     time::SystemTime,
 };
 
 use clap::{Args, ValueEnum};
-use color_eyre::eyre;
+use color_eyre::eyre::{self, Context};
+use rexpect::session::PtyReplSession;
 use serde::Deserialize;
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::asciicast;
@@ -46,6 +50,7 @@ impl TryFrom<Script> for asciicast::File {
             type_speed,
             prompt,
             secondary_prompt,
+            timeout,
         } = value.settings;
 
         let (width, height) = match (width, height) {
@@ -62,19 +67,22 @@ impl TryFrom<Script> for asciicast::File {
             (Some(width), Some(height)) => (width, height),
         };
 
+        let shell_env = match &shell {
+            Shell::Bash => String::from("bash"),
+            Shell::Python => String::from("python"),
+            Shell::Custom { program, .. } => program.clone(),
+        };
+
+        let repl_session = shell
+            .spawn(Some(timeout), environment.iter().map(Into::into))
+            .wrap_err("could not start shell's PTY session")?;
+
         let mut env: HashMap<_, _> = environment.into_iter().map(Into::into).collect();
         for env_var in environment_capture {
             env.entry(env_var)
                 .or_insert_with_key(|key| std::env::var(key).unwrap_or_default());
         }
-        let shell_env = match &shell {
-            Shell::Bash => "bash",
-            Shell::Python => "python",
-            Shell::Custom { program, .. } => program,
-        };
-        env.insert(String::from("SHELL"), String::from(shell_env));
-
-        todo!("run instructions to get events");
+        env.insert(String::from("SHELL"), shell_env);
 
         Ok(Self {
             header: asciicast::Header {
@@ -92,7 +100,7 @@ impl TryFrom<Script> for asciicast::File {
     }
 }
 
-#[derive(Args, Deserialize, Debug, Default, Clone)]
+#[derive(Args, Deserialize, Debug, Clone)]
 pub struct Settings {
     /// Terminal width
     ///
@@ -151,8 +159,8 @@ pub struct Settings {
     /// Can be specified in seconds (s), milliseconds (ms), or microseconds (us)
     ///
     /// Use integers and the above abbreviations when specifying, i.e. "1s", "150ms", or "900us"
-    #[arg(short = 'd', long, visible_alias = "delay", default_value_t)]
-    #[serde(default)]
+    #[arg(short = 'd', long, visible_alias = "delay", default_value_t = default_type_speed())]
+    #[serde(default = "default_type_speed")]
     type_speed: Duration,
 
     /// The shell prompt to use in the asciicast output
@@ -164,6 +172,19 @@ pub struct Settings {
     #[arg(long, default_value = DEFAULT_SECONDARY_PROMPT)]
     #[serde(default = "default_secondary_prompt")]
     secondary_prompt: String,
+
+    /// Maximum amount of time to let a shell command run before returning with an error
+    ///
+    /// Can be specified in seconds (s), milliseconds (ms), or microseconds (us)
+    ///
+    /// Use integers and the above abbreviations when specifying, i.e. "1s", "150ms", or "900us"
+    #[arg(long, default_value_t = default_timeout())]
+    #[serde(default = "default_timeout")]
+    timeout: Duration,
+}
+
+const fn default_type_speed() -> Duration {
+    Duration::Milliseconds(100)
 }
 
 const DEFAULT_PROMPT: &str = "$ ";
@@ -174,6 +195,10 @@ fn default_prompt() -> String {
 const DEFAULT_SECONDARY_PROMPT: &str = "> ";
 fn default_secondary_prompt() -> String {
     String::from(DEFAULT_SECONDARY_PROMPT)
+}
+
+const fn default_timeout() -> Duration {
+    Duration::Seconds(30)
 }
 
 impl Merge for Settings {
@@ -202,6 +227,7 @@ impl Merge for Settings {
             type_speed,
             prompt,
             secondary_prompt,
+            timeout,
         } = other;
 
         self.width.merge(width);
@@ -210,12 +236,34 @@ impl Merge for Settings {
         self.shell.merge(shell);
         self.environment.merge(environment);
         self.environment_capture.merge(environment_capture);
-        self.type_speed.merge(type_speed);
+        if type_speed != default_type_speed() {
+            self.type_speed = type_speed;
+        }
         if prompt != DEFAULT_PROMPT {
             self.prompt = prompt;
         }
         if secondary_prompt != DEFAULT_SECONDARY_PROMPT {
             self.secondary_prompt = secondary_prompt;
+        }
+        if timeout != default_timeout() {
+            self.timeout = timeout;
+        }
+    }
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            width: None,
+            height: None,
+            title: None,
+            shell: Shell::default(),
+            environment: Vec::new(),
+            environment_capture: Vec::new(),
+            type_speed: default_type_speed(),
+            prompt: default_prompt(),
+            secondary_prompt: default_secondary_prompt(),
+            timeout: default_timeout(),
         }
     }
 }
@@ -264,6 +312,153 @@ impl Merge for Shell {
     }
 }
 
+impl Shell {
+    fn spawn<I, K, V>(
+        self,
+        timeout: Option<Duration>,
+        environment: I,
+    ) -> color_eyre::Result<PtyReplSession>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        match self {
+            Self::Bash => spawn_bash(timeout, environment),
+            Self::Python => spawn_python(timeout, environment),
+            Self::Custom {
+                program,
+                args,
+                prompt,
+                quit_command,
+                echo_on,
+            } => spawn_custom(
+                timeout,
+                program,
+                args,
+                environment,
+                prompt,
+                quit_command,
+                echo_on,
+            ),
+        }
+    }
+}
+
+const BASH_RCFILE: &str = r#"include () { [[ -f "$1" ]] && source "$1"; }
+include /etc/bashrc
+include ~/.bashrc
+PS1="~~~~"
+unset PROMPT_COMMAND
+"#;
+
+// Very similar to rexpect::spawn_bash(), see comments in rexpect source for details
+fn spawn_bash<I, K, V>(
+    timeout: Option<Duration>,
+    environment: I,
+) -> color_eyre::Result<PtyReplSession>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let mut rcfile = NamedTempFile::new().wrap_err("could not create temp rcfile")?;
+    rcfile
+        .write_all(BASH_RCFILE.as_bytes())
+        .wrap_err("could not write to temp rcfile")?;
+
+    let mut command = process::Command::new("bash");
+    command.arg("--rcfile").arg(rcfile.path()).envs(environment);
+
+    let pty_session = rexpect::session::spawn_command(command, timeout.map(Duration::as_millis))
+        .wrap_err("could not start pty session")?;
+
+    let prompt = "[AUTOCAST_PROMPT>";
+    let mut repl_session = PtyReplSession {
+        prompt: String::from(prompt),
+        pty_session,
+        quit_command: Some(String::from("exit")),
+        echo_on: false,
+    };
+
+    repl_session
+        .exp_string("~~~~")
+        .wrap_err("temp prompt was not present")?;
+    rcfile.close().wrap_err("could not remove temp rcfile")?;
+    repl_session
+        .send_line(&format!("PS1='{prompt}'"))
+        .wrap_err("could not set new prompt")?;
+    repl_session
+        .wait_for_prompt()
+        .wrap_err("prompt not detected")?;
+
+    Ok(repl_session)
+}
+
+fn spawn_python<I, K, V>(
+    timeout: Option<Duration>,
+    environment: I,
+) -> color_eyre::Result<PtyReplSession>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let mut command = process::Command::new("python");
+    command.envs(environment);
+
+    let pty_session = rexpect::session::spawn_command(command, timeout.map(Duration::as_millis))
+        .wrap_err("could not start pty session")?;
+
+    let mut repl_session = PtyReplSession {
+        prompt: String::from(">>> "),
+        pty_session,
+        quit_command: Some(String::from("exit()")),
+        echo_on: true,
+    };
+    repl_session
+        .wait_for_prompt()
+        .wrap_err("could not detect prompt")?;
+
+    Ok(repl_session)
+}
+
+fn spawn_custom<P, A, S, E, K, V>(
+    timeout: Option<Duration>,
+    program: P,
+    args: A,
+    environment: E,
+    prompt: String,
+    quit_command: Option<String>,
+    echo_on: bool,
+) -> color_eyre::Result<PtyReplSession>
+where
+    P: AsRef<OsStr>,
+    A: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let mut command = process::Command::new(program);
+    command.args(args).envs(environment);
+
+    let pty_session = rexpect::session::spawn_command(command, timeout.map(Duration::as_millis))
+        .wrap_err("could not start pty session")?;
+
+    let mut repl_session = PtyReplSession {
+        prompt,
+        pty_session,
+        quit_command,
+        echo_on,
+    };
+    repl_session
+        .wait_for_prompt()
+        .wrap_err("could not detect prompt")?;
+
+    Ok(repl_session)
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct EnvVar {
     name: String,
@@ -292,17 +487,17 @@ impl From<EnvVar> for (String, String) {
     }
 }
 
+impl<'a> From<&'a EnvVar> for (&'a String, &'a String) {
+    fn from(value: &'a EnvVar) -> Self {
+        (&value.name, &value.value)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 enum Duration {
     Seconds(u64),
     Milliseconds(u64),
     Microseconds(u64),
-}
-
-impl Default for Duration {
-    fn default() -> Self {
-        Self::Milliseconds(100)
-    }
 }
 
 impl Display for Duration {
@@ -353,10 +548,12 @@ impl From<Duration> for std::time::Duration {
     }
 }
 
-impl Merge for Duration {
-    fn merge(&mut self, other: Self) {
-        if other != Self::default() {
-            *self = other;
+impl Duration {
+    fn as_millis(self) -> u64 {
+        match self {
+            Self::Seconds(s) => s * 1_000,
+            Self::Milliseconds(ms) => ms,
+            Self::Microseconds(us) => us / 1_000,
         }
     }
 }
@@ -366,18 +563,18 @@ enum Instruction {
     Command {
         command: Command,
         #[serde(default)]
-        timeout: Option<Duration>,
-        // #[serde(default)]
-        // do_not_wait_for_completion: bool,
+        hidden: bool,
+        #[serde(default)]
+        type_speed: Option<Duration>,
     },
     Interactive {
         command: Command,
         keys: Vec<Key>,
+        #[serde(default)]
+        type_speed: Option<Duration>,
     },
     Wait(Duration),
     Marker(String),
-    Hide,
-    Show,
     Clear,
 }
 

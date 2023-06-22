@@ -4,6 +4,7 @@
         "autocast",
         "rcfile",
         "rexpect",
-        "shlex"
+        "shlex",
+        "tempfile"
     ]
 }
