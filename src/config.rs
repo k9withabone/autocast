@@ -17,7 +17,7 @@ use serde::Deserialize;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::asciicast;
+use crate::asciicast::{self, Event};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Script {
@@ -67,15 +67,32 @@ impl TryFrom<Script> for asciicast::File {
             (Some(width), Some(height)) => (width, height),
         };
 
+        let line_split = shell.line_split().to_string();
         let shell_env = match &shell {
             Shell::Bash => String::from("bash"),
             Shell::Python => String::from("python"),
             Shell::Custom { program, .. } => program.clone(),
         };
 
-        let repl_session = shell
+        let mut repl_session = shell
             .spawn(Some(timeout), environment.iter().map(Into::into))
             .wrap_err("could not start shell's PTY session")?;
+
+        let mut time = std::time::Duration::ZERO;
+        let mut events = Vec::new();
+        for instruction in value.instructions {
+            let output = instruction
+                .run(
+                    &mut time,
+                    &prompt,
+                    &secondary_prompt,
+                    type_speed,
+                    &line_split,
+                    &mut repl_session,
+                )
+                .wrap_err("error running instruction")?;
+            events.extend(output);
+        }
 
         let mut env: HashMap<_, _> = environment.into_iter().map(Into::into).collect();
         for env_var in environment_capture {
@@ -95,7 +112,7 @@ impl TryFrom<Script> for asciicast::File {
                 title,
                 env,
             },
-            events: Vec::new(),
+            events,
         })
     }
 }
@@ -278,6 +295,7 @@ enum Shell {
         #[serde(default)]
         args: Vec<String>,
         prompt: String,
+        line_split: String,
         #[serde(default)]
         quit_command: Option<String>,
         #[serde(default)]
@@ -313,6 +331,13 @@ impl Merge for Shell {
 }
 
 impl Shell {
+    fn line_split(&self) -> &str {
+        match self {
+            Self::Bash | Self::Python => " \\",
+            Self::Custom { line_split, .. } => line_split,
+        }
+    }
+
     fn spawn<I, K, V>(
         self,
         timeout: Option<Duration>,
@@ -330,6 +355,7 @@ impl Shell {
                 program,
                 args,
                 prompt,
+                line_split: _,
                 quit_command,
                 echo_on,
             } => spawn_custom(
@@ -578,11 +604,147 @@ enum Instruction {
     Clear,
 }
 
+impl Instruction {
+    fn run(
+        self,
+        time: &mut std::time::Duration,
+        prompt: &str,
+        secondary_prompt: &str,
+        default_type_speed: Duration,
+        line_split: &str,
+        repl_session: &mut PtyReplSession,
+    ) -> color_eyre::Result<Vec<Event>> {
+        match self {
+            Self::Command {
+                command,
+                hidden,
+                type_speed,
+            } => {
+                let mut output = command
+                    .run(repl_session)
+                    .wrap_err("error running command")?;
+
+                if hidden {
+                    return Ok(Vec::new());
+                }
+
+                let type_speed = type_speed.unwrap_or(default_type_speed).into();
+
+                // capacity: command len + output + prompt
+                let mut events = Vec::with_capacity(command.len(line_split) + output.len() + 1);
+                match command {
+                    Command::SingleLine(line) => type_line(&mut events, time, type_speed, &line),
+                    Command::MultiLine(lines) => {
+                        let num_lines = lines.len();
+                        for (line_num, mut line) in lines.into_iter().enumerate() {
+                            if line_num != 0 {
+                                *time += type_speed;
+                                events.push(Event::output(*time, String::from(secondary_prompt)));
+                            }
+                            if line_num + 1 < num_lines {
+                                line += line_split;
+                            }
+
+                            type_line(&mut events, time, type_speed, &line);
+                        }
+                    }
+                    Command::Control(char) => {
+                        type_line(&mut events, time, type_speed, &format!("^{char}"));
+                    }
+                }
+
+                for event in &mut output {
+                    event.time += *time;
+                }
+                // advance time to output end
+                *time = output.last().map_or(*time, |event| event.time);
+                events.extend(output);
+
+                events.push(Event::output(*time, String::from(prompt)));
+
+                Ok(events)
+            }
+            Self::Interactive {
+                command,
+                keys,
+                type_speed,
+            } => todo!(),
+            Self::Wait(duration) => {
+                *time += duration.into();
+                Ok(Vec::new())
+            }
+            Self::Marker(data) => Ok(vec![Event::marker(*time, data)]),
+            Self::Clear => {
+                *time += default_type_speed.into();
+                let mut events = Vec::with_capacity(2);
+                events.push(Event::output(*time, String::from("\r\x1b[H\x1b[2J\x1b[3J")));
+                *time += default_type_speed.into();
+                events.push(Event::output(*time, String::from(prompt)));
+                Ok(events)
+            }
+        }
+    }
+}
+
+fn type_line(
+    events: &mut Vec<Event>,
+    time: &mut std::time::Duration,
+    type_speed: std::time::Duration,
+    line: &str,
+) {
+    for char in line.chars() {
+        *time += type_speed;
+        events.push(Event::output(*time, String::from(char)));
+    }
+    *time += type_speed;
+    events.push(Event::output(*time, String::from('\n')));
+}
+
 #[derive(Deserialize, Debug, Clone)]
 enum Command {
     SingleLine(String),
     MultiLine(Vec<String>),
     Control(char),
+}
+
+impl Command {
+    fn len(&self, line_split: &str) -> usize {
+        match self {
+            Self::SingleLine(line) => line.len(),
+            Self::MultiLine(lines) => {
+                let num_lines = lines.len().saturating_sub(1);
+                // secondary prompts + line lengths + line splits
+                num_lines
+                    + lines.iter().map(String::len).sum::<usize>()
+                    + (line_split.len() * num_lines)
+            }
+            Self::Control(_) => 1,
+        }
+    }
+
+    fn run(&self, repl_session: &mut PtyReplSession) -> color_eyre::Result<Vec<Event>> {
+        let send_error = "could not send command to shell";
+        match self {
+            Self::SingleLine(line) => {
+                repl_session.send_line(line).wrap_err(send_error)?;
+                read_events(repl_session)
+            }
+            Self::MultiLine(lines) => {
+                repl_session
+                    .send_line(&lines.join(" "))
+                    .wrap_err(send_error)?;
+                read_events(repl_session)
+            }
+            Self::Control(char) => {
+                repl_session.send_control(*char).wrap_err(send_error)?;
+                read_events(repl_session)
+            }
+        }
+    }
+}
+
+fn read_events(repl_session: &mut PtyReplSession) -> color_eyre::Result<Vec<Event>> {
+    todo!()
 }
 
 #[derive(Deserialize, Debug, Clone)]

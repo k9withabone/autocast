@@ -109,6 +109,32 @@ impl Serialize for Event {
     }
 }
 
+impl Event {
+    pub fn input(time: Duration, data: String) -> Self {
+        Self {
+            time,
+            event_type: EventType::Input,
+            data,
+        }
+    }
+
+    pub fn output(time: Duration, data: String) -> Self {
+        Self {
+            time,
+            event_type: EventType::Output,
+            data,
+        }
+    }
+
+    pub fn marker(time: Duration, data: String) -> Self {
+        Self {
+            time,
+            event_type: EventType::Marker,
+            data,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum EventType {
     Input,
