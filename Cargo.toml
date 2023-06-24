@@ -8,11 +8,10 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.3", features = ["derive"] }
 color-eyre = "0.6"
-rexpect = "0.5"
+expectrl = "0.7.0"
 ron = "0.8.0"
 serde = { version = "1.0.164", features = ["derive"] }
 serde_json = "1.0.97"
 shlex = "1.1.0"
-tempfile = "3.6.0"
 terminal_size = "0.2.6"
 thiserror = "1.0.40"

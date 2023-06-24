@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fmt::{self, Display},
-    io::{Read, Write},
+    io::Read,
     iter,
     num::ParseIntError,
     process,
@@ -12,9 +12,8 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
-use rexpect::session::PtyReplSession;
+use expectrl::{repl::ReplSession, ControlCode, Session};
 use serde::Deserialize;
-use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::asciicast::{self, Event};
@@ -76,7 +75,7 @@ impl TryFrom<Script> for asciicast::File {
 
         let mut repl_session = shell
             .spawn(Some(timeout), environment.iter().map(Into::into))
-            .wrap_err("could not start shell's PTY session")?;
+            .wrap_err("could not start shell")?;
 
         let mut time = std::time::Duration::ZERO;
         let mut events = Vec::new();
@@ -93,6 +92,7 @@ impl TryFrom<Script> for asciicast::File {
                 .wrap_err("error running instruction")?;
             events.extend(output);
         }
+        repl_session.exit().wrap_err("could not exit shell")?;
 
         let mut env: HashMap<_, _> = environment.into_iter().map(Into::into).collect();
         for env_var in environment_capture {
@@ -299,7 +299,7 @@ enum Shell {
         #[serde(default)]
         quit_command: Option<String>,
         #[serde(default)]
-        echo_on: bool,
+        echo: bool,
     },
 }
 
@@ -338,15 +338,15 @@ impl Shell {
         }
     }
 
-    fn spawn<I, K, V>(
+    fn spawn<'a, I, K, V>(
         self,
         timeout: Option<Duration>,
         environment: I,
-    ) -> color_eyre::Result<PtyReplSession>
+    ) -> color_eyre::Result<ReplSession>
     where
-        I: IntoIterator<Item = (K, V)>,
-        K: AsRef<OsStr>,
-        V: AsRef<OsStr>,
+        I: IntoIterator<Item = (&'a K, &'a V)>,
+        K: AsRef<OsStr> + 'a,
+        V: AsRef<OsStr> + 'a,
     {
         match self {
             Self::Bash => spawn_bash(timeout, environment),
@@ -357,7 +357,7 @@ impl Shell {
                 prompt,
                 line_split: _,
                 quit_command,
-                echo_on,
+                echo,
             } => spawn_custom(
                 timeout,
                 program,
@@ -365,88 +365,64 @@ impl Shell {
                 environment,
                 prompt,
                 quit_command,
-                echo_on,
+                echo,
             ),
         }
     }
 }
 
-const BASH_RCFILE: &str = r#"include () { [[ -f "$1" ]] && source "$1"; }
-include /etc/bashrc
-include ~/.bashrc
-PS1="~~~~"
-unset PROMPT_COMMAND
-"#;
-
-// Very similar to rexpect::spawn_bash(), see comments in rexpect source for details
-fn spawn_bash<I, K, V>(
+fn spawn_bash<'a, I, K, V>(
     timeout: Option<Duration>,
     environment: I,
-) -> color_eyre::Result<PtyReplSession>
+) -> color_eyre::Result<ReplSession>
 where
-    I: IntoIterator<Item = (K, V)>,
-    K: AsRef<OsStr>,
-    V: AsRef<OsStr>,
+    I: IntoIterator<Item = (&'a K, &'a V)>,
+    K: AsRef<OsStr> + 'a,
+    V: AsRef<OsStr> + 'a,
 {
-    let mut rcfile = NamedTempFile::new().wrap_err("could not create temp rcfile")?;
-    rcfile
-        .write_all(BASH_RCFILE.as_bytes())
-        .wrap_err("could not write to temp rcfile")?;
+    const PROMPT: &str = "[AUTOCAST_PROMPT>";
+    let environment = environment
+        .into_iter()
+        .map(|(key, value)| (key.as_ref(), value.as_ref()))
+        .chain([
+            (OsStr::new("PS1"), OsStr::new(PROMPT)),
+            (
+                OsStr::new("PROMPT_COMMAND"),
+                OsStr::new(
+                    "PS1=[AUTOCAST_PROMPT>; unset PROMPT_COMMAND; bind 'set enable-bracketed-paste off'"
+                ),
+            ),
+        ]);
 
-    let mut command = process::Command::new("bash");
-    command.arg("--rcfile").arg(rcfile.path()).envs(environment);
-
-    let pty_session = rexpect::session::spawn_command(command, timeout.map(Duration::as_millis))
-        .wrap_err("could not start pty session")?;
-
-    let prompt = "[AUTOCAST_PROMPT>";
-    let mut repl_session = PtyReplSession {
-        prompt: String::from(prompt),
-        pty_session,
-        quit_command: Some(String::from("exit")),
-        echo_on: false,
-    };
-
-    repl_session
-        .exp_string("~~~~")
-        .wrap_err("temp prompt was not present")?;
-    rcfile.close().wrap_err("could not remove temp rcfile")?;
-    repl_session
-        .send_line(&format!("PS1='{prompt}'"))
-        .wrap_err("could not set new prompt")?;
-    repl_session
-        .wait_for_prompt()
-        .wrap_err("prompt not detected")?;
-
-    Ok(repl_session)
+    spawn_custom(
+        timeout,
+        "bash",
+        iter::empty::<&OsStr>(),
+        environment,
+        String::from(PROMPT),
+        Some(String::from("exit")),
+        false,
+    )
 }
 
 fn spawn_python<I, K, V>(
     timeout: Option<Duration>,
     environment: I,
-) -> color_eyre::Result<PtyReplSession>
+) -> color_eyre::Result<ReplSession>
 where
     I: IntoIterator<Item = (K, V)>,
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
-    let mut command = process::Command::new("python");
-    command.envs(environment);
-
-    let pty_session = rexpect::session::spawn_command(command, timeout.map(Duration::as_millis))
-        .wrap_err("could not start pty session")?;
-
-    let mut repl_session = PtyReplSession {
-        prompt: String::from(">>> "),
-        pty_session,
-        quit_command: Some(String::from("exit()")),
-        echo_on: true,
-    };
-    repl_session
-        .wait_for_prompt()
-        .wrap_err("could not detect prompt")?;
-
-    Ok(repl_session)
+    spawn_custom(
+        timeout,
+        "python",
+        iter::empty::<&OsStr>(),
+        environment,
+        String::from(">>> "),
+        Some(String::from("exit()")),
+        false,
+    )
 }
 
 fn spawn_custom<P, A, S, E, K, V>(
@@ -456,8 +432,8 @@ fn spawn_custom<P, A, S, E, K, V>(
     environment: E,
     prompt: String,
     quit_command: Option<String>,
-    echo_on: bool,
-) -> color_eyre::Result<PtyReplSession>
+    echo: bool,
+) -> color_eyre::Result<ReplSession>
 where
     P: AsRef<OsStr>,
     A: IntoIterator<Item = S>,
@@ -466,20 +442,16 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
+    // TODO: set process terminal's width and height
     let mut command = process::Command::new(program);
     command.args(args).envs(environment);
 
-    let pty_session = rexpect::session::spawn_command(command, timeout.map(Duration::as_millis))
-        .wrap_err("could not start pty session")?;
+    let mut session = Session::spawn(command).wrap_err("could not start pty session")?;
+    session.set_expect_timeout(timeout.map(Into::into));
 
-    let mut repl_session = PtyReplSession {
-        prompt,
-        pty_session,
-        quit_command,
-        echo_on,
-    };
+    let mut repl_session = ReplSession::new(session, prompt, quit_command, echo);
     repl_session
-        .wait_for_prompt()
+        .expect_prompt()
         .wrap_err("could not detect prompt")?;
 
     Ok(repl_session)
@@ -574,16 +546,6 @@ impl From<Duration> for std::time::Duration {
     }
 }
 
-impl Duration {
-    fn as_millis(self) -> u64 {
-        match self {
-            Self::Seconds(s) => s * 1_000,
-            Self::Milliseconds(ms) => ms,
-            Self::Microseconds(us) => us / 1_000,
-        }
-    }
-}
-
 #[derive(Deserialize, Debug, Clone)]
 enum Instruction {
     Command {
@@ -612,7 +574,7 @@ impl Instruction {
         secondary_prompt: &str,
         default_type_speed: Duration,
         line_split: &str,
-        repl_session: &mut PtyReplSession,
+        repl_session: &mut ReplSession,
     ) -> color_eyre::Result<Vec<Event>> {
         match self {
             Self::Command {
@@ -649,7 +611,12 @@ impl Instruction {
                         }
                     }
                     Command::Control(char) => {
-                        type_line(&mut events, time, type_speed, &format!("^{char}"));
+                        type_line(
+                            &mut events,
+                            time,
+                            type_speed,
+                            &format!("^{}", char.to_ascii_uppercase()),
+                        );
                     }
                 }
 
@@ -722,28 +689,33 @@ impl Command {
         }
     }
 
-    fn run(&self, repl_session: &mut PtyReplSession) -> color_eyre::Result<Vec<Event>> {
-        let send_error = "could not send command to shell";
+    fn run(&self, repl_session: &mut ReplSession) -> color_eyre::Result<Vec<Event>> {
+        const SEND_ERROR: &str = "could not send command to shell";
         match self {
             Self::SingleLine(line) => {
-                repl_session.send_line(line).wrap_err(send_error)?;
+                repl_session.send_line(line).wrap_err(SEND_ERROR)?;
                 read_events(repl_session)
             }
             Self::MultiLine(lines) => {
                 repl_session
                     .send_line(&lines.join(" "))
-                    .wrap_err(send_error)?;
+                    .wrap_err(SEND_ERROR)?;
                 read_events(repl_session)
             }
             Self::Control(char) => {
-                repl_session.send_control(*char).wrap_err(send_error)?;
+                repl_session
+                    .send(
+                        ControlCode::try_from(*char)
+                            .map_err(|_| eyre::eyre!("invalid control code"))?,
+                    )
+                    .wrap_err(SEND_ERROR)?;
                 read_events(repl_session)
             }
         }
     }
 }
 
-fn read_events(repl_session: &mut PtyReplSession) -> color_eyre::Result<Vec<Event>> {
+fn read_events(repl_session: &mut ReplSession) -> color_eyre::Result<Vec<Event>> {
     todo!()
 }
 
