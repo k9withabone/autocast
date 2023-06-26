@@ -2,9 +2,9 @@
     "cSpell.words": [
         "asciicast",
         "autocast",
+        "bufs",
+        "expectrl",
         "rcfile",
-        "rexpect",
-        "shlex",
-        "tempfile"
+        "shlex"
     ]
 }

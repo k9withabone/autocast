@@ -126,6 +126,14 @@ impl Event {
         }
     }
 
+    pub fn outputln(time: Duration) -> Self {
+        Self {
+            time,
+            event_type: EventType::Output,
+            data: String::from("\r\n"),
+        }
+    }
+
     pub fn marker(time: Duration, data: String) -> Self {
         Self {
             time,

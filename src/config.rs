@@ -1,3 +1,5 @@
+mod spawn;
+
 use std::{
     collections::HashMap,
     ffi::OsStr,
@@ -12,11 +14,13 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
-use expectrl::{repl::ReplSession, ControlCode, Session};
+use expectrl::ControlCode;
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::asciicast::{self, Event};
+
+use self::spawn::ReplSession;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Script {
@@ -74,11 +78,17 @@ impl TryFrom<Script> for asciicast::File {
         };
 
         let mut repl_session = shell
-            .spawn(Some(timeout), environment.iter().map(Into::into))
+            .spawn(
+                Some(timeout),
+                environment.iter().map(Into::into),
+                width,
+                height,
+            )
             .wrap_err("could not start shell")?;
 
         let mut time = std::time::Duration::ZERO;
         let mut events = Vec::new();
+        events.push(Event::output(time, prompt.clone()));
         for instruction in value.instructions {
             let output = instruction
                 .run(
@@ -92,6 +102,8 @@ impl TryFrom<Script> for asciicast::File {
                 .wrap_err("error running instruction")?;
             events.extend(output);
         }
+        time += type_speed.into();
+        events.push(Event::outputln(time));
         repl_session.exit().wrap_err("could not exit shell")?;
 
         let mut env: HashMap<_, _> = environment.into_iter().map(Into::into).collect();
@@ -338,19 +350,21 @@ impl Shell {
         }
     }
 
-    fn spawn<'a, I, K, V>(
+    fn spawn<I, K, V>(
         self,
         timeout: Option<Duration>,
         environment: I,
+        width: u16,
+        height: u16,
     ) -> color_eyre::Result<ReplSession>
     where
-        I: IntoIterator<Item = (&'a K, &'a V)>,
-        K: AsRef<OsStr> + 'a,
-        V: AsRef<OsStr> + 'a,
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
     {
         match self {
-            Self::Bash => spawn_bash(timeout, environment),
-            Self::Python => spawn_python(timeout, environment),
+            Self::Bash => spawn::bash(timeout, environment, width, height),
+            Self::Python => spawn::python(timeout, environment, width, height),
             Self::Custom {
                 program,
                 args,
@@ -358,103 +372,13 @@ impl Shell {
                 line_split: _,
                 quit_command,
                 echo,
-            } => spawn_custom(
-                timeout,
-                program,
-                args,
-                environment,
-                prompt,
-                quit_command,
-                echo,
-            ),
+            } => {
+                let mut command = process::Command::new(program);
+                command.args(args).envs(environment);
+                spawn::custom(command, timeout, width, height, prompt, quit_command, echo)
+            }
         }
     }
-}
-
-fn spawn_bash<'a, I, K, V>(
-    timeout: Option<Duration>,
-    environment: I,
-) -> color_eyre::Result<ReplSession>
-where
-    I: IntoIterator<Item = (&'a K, &'a V)>,
-    K: AsRef<OsStr> + 'a,
-    V: AsRef<OsStr> + 'a,
-{
-    const PROMPT: &str = "[AUTOCAST_PROMPT>";
-    let environment = environment
-        .into_iter()
-        .map(|(key, value)| (key.as_ref(), value.as_ref()))
-        .chain([
-            (OsStr::new("PS1"), OsStr::new(PROMPT)),
-            (
-                OsStr::new("PROMPT_COMMAND"),
-                OsStr::new(
-                    "PS1=[AUTOCAST_PROMPT>; unset PROMPT_COMMAND; bind 'set enable-bracketed-paste off'"
-                ),
-            ),
-        ]);
-
-    spawn_custom(
-        timeout,
-        "bash",
-        iter::empty::<&OsStr>(),
-        environment,
-        String::from(PROMPT),
-        Some(String::from("exit")),
-        false,
-    )
-}
-
-fn spawn_python<I, K, V>(
-    timeout: Option<Duration>,
-    environment: I,
-) -> color_eyre::Result<ReplSession>
-where
-    I: IntoIterator<Item = (K, V)>,
-    K: AsRef<OsStr>,
-    V: AsRef<OsStr>,
-{
-    spawn_custom(
-        timeout,
-        "python",
-        iter::empty::<&OsStr>(),
-        environment,
-        String::from(">>> "),
-        Some(String::from("exit()")),
-        false,
-    )
-}
-
-fn spawn_custom<P, A, S, E, K, V>(
-    timeout: Option<Duration>,
-    program: P,
-    args: A,
-    environment: E,
-    prompt: String,
-    quit_command: Option<String>,
-    echo: bool,
-) -> color_eyre::Result<ReplSession>
-where
-    P: AsRef<OsStr>,
-    A: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-    E: IntoIterator<Item = (K, V)>,
-    K: AsRef<OsStr>,
-    V: AsRef<OsStr>,
-{
-    // TODO: set process terminal's width and height
-    let mut command = process::Command::new(program);
-    command.args(args).envs(environment);
-
-    let mut session = Session::spawn(command).wrap_err("could not start pty session")?;
-    session.set_expect_timeout(timeout.map(Into::into));
-
-    let mut repl_session = ReplSession::new(session, prompt, quit_command, echo);
-    repl_session
-        .expect_prompt()
-        .wrap_err("could not detect prompt")?;
-
-    Ok(repl_session)
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -582,50 +506,35 @@ impl Instruction {
                 hidden,
                 type_speed,
             } => {
-                let mut output = command
-                    .run(repl_session)
-                    .wrap_err("error running command")?;
+                command
+                    .send(repl_session)
+                    .wrap_err("could not send command to shell")?;
+                repl_session
+                    .expect_prompt()
+                    .wrap_err("could not detect prompt")?;
 
                 if hidden {
                     return Ok(Vec::new());
                 }
 
-                let type_speed = type_speed.unwrap_or(default_type_speed).into();
+                let output = repl_session.get_stream_mut().drain(..);
 
                 // capacity: command len + output + prompt
                 let mut events = Vec::with_capacity(command.len(line_split) + output.len() + 1);
-                match command {
-                    Command::SingleLine(line) => type_line(&mut events, time, type_speed, &line),
-                    Command::MultiLine(lines) => {
-                        let num_lines = lines.len();
-                        for (line_num, mut line) in lines.into_iter().enumerate() {
-                            if line_num != 0 {
-                                *time += type_speed;
-                                events.push(Event::output(*time, String::from(secondary_prompt)));
-                            }
-                            if line_num + 1 < num_lines {
-                                line += line_split;
-                            }
 
-                            type_line(&mut events, time, type_speed, &line);
-                        }
-                    }
-                    Command::Control(char) => {
-                        type_line(
-                            &mut events,
-                            time,
-                            type_speed,
-                            &format!("^{}", char.to_ascii_uppercase()),
-                        );
-                    }
-                }
+                let type_speed = type_speed.unwrap_or(default_type_speed).into();
+                command.add_to_events(&mut events, time, type_speed, secondary_prompt, line_split);
 
-                for event in &mut output {
+                events.extend(output.map(|mut event| {
                     event.time += *time;
-                }
+                    event
+                }));
+
+                repl_session.get_stream_mut().reset();
+
                 // advance time to output end
-                *time = output.last().map_or(*time, |event| event.time);
-                events.extend(output);
+                // TODO: add buffer between last output event and prompt
+                *time = events.last().map_or(*time, |event| event.time);
 
                 events.push(Event::output(*time, String::from(prompt)));
 
@@ -642,29 +551,20 @@ impl Instruction {
             }
             Self::Marker(data) => Ok(vec![Event::marker(*time, data)]),
             Self::Clear => {
-                *time += default_type_speed.into();
+                let type_speed = default_type_speed.into();
+
                 let mut events = Vec::with_capacity(2);
+
+                *time += type_speed;
                 events.push(Event::output(*time, String::from("\r\x1b[H\x1b[2J\x1b[3J")));
-                *time += default_type_speed.into();
+
+                *time += type_speed;
                 events.push(Event::output(*time, String::from(prompt)));
+
                 Ok(events)
             }
         }
     }
-}
-
-fn type_line(
-    events: &mut Vec<Event>,
-    time: &mut std::time::Duration,
-    type_speed: std::time::Duration,
-    line: &str,
-) {
-    for char in line.chars() {
-        *time += type_speed;
-        events.push(Event::output(*time, String::from(char)));
-    }
-    *time += type_speed;
-    events.push(Event::output(*time, String::from('\n')));
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -689,34 +589,66 @@ impl Command {
         }
     }
 
-    fn run(&self, repl_session: &mut ReplSession) -> color_eyre::Result<Vec<Event>> {
-        const SEND_ERROR: &str = "could not send command to shell";
+    fn send(&self, repl_session: &mut ReplSession) -> color_eyre::Result<()> {
+        repl_session.get_stream_mut().reset();
         match self {
-            Self::SingleLine(line) => {
-                repl_session.send_line(line).wrap_err(SEND_ERROR)?;
-                read_events(repl_session)
+            Self::SingleLine(line) => repl_session.send_line(line)?,
+            Self::MultiLine(lines) => repl_session.send_line(&lines.join(" "))?,
+            Self::Control(char) => repl_session.send(
+                ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
+            )?,
+        }
+        Ok(())
+    }
+
+    fn add_to_events(
+        self,
+        events: &mut Vec<Event>,
+        time: &mut std::time::Duration,
+        type_speed: std::time::Duration,
+        secondary_prompt: &str,
+        line_split: &str,
+    ) {
+        match self {
+            Command::SingleLine(line) => type_line(events, time, type_speed, &line),
+            Command::MultiLine(lines) => {
+                let num_lines = lines.len();
+                for (line_num, mut line) in lines.into_iter().enumerate() {
+                    if line_num != 0 {
+                        *time += type_speed;
+                        events.push(Event::output(*time, String::from(secondary_prompt)));
+                    }
+                    if line_num + 1 < num_lines {
+                        line += line_split;
+                    }
+
+                    type_line(events, time, type_speed, &line);
+                }
             }
-            Self::MultiLine(lines) => {
-                repl_session
-                    .send_line(&lines.join(" "))
-                    .wrap_err(SEND_ERROR)?;
-                read_events(repl_session)
-            }
-            Self::Control(char) => {
-                repl_session
-                    .send(
-                        ControlCode::try_from(*char)
-                            .map_err(|_| eyre::eyre!("invalid control code"))?,
-                    )
-                    .wrap_err(SEND_ERROR)?;
-                read_events(repl_session)
+            Command::Control(char) => {
+                type_line(
+                    events,
+                    time,
+                    type_speed,
+                    &format!("^{}", char.to_ascii_uppercase()),
+                );
             }
         }
     }
 }
 
-fn read_events(repl_session: &mut ReplSession) -> color_eyre::Result<Vec<Event>> {
-    todo!()
+fn type_line(
+    events: &mut Vec<Event>,
+    time: &mut std::time::Duration,
+    type_speed: std::time::Duration,
+    line: &str,
+) {
+    for char in line.chars() {
+        *time += type_speed;
+        events.push(Event::output(*time, String::from(char)));
+    }
+    *time += type_speed;
+    events.push(Event::outputln(*time));
 }
 
 #[derive(Deserialize, Debug, Clone)]
