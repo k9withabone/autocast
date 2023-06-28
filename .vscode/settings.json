@@ -4,6 +4,9 @@
         "autocast",
         "bufs",
         "expectrl",
+        "itertools",
+        "outputln",
+        "peekable",
         "rcfile",
         "shlex"
     ]

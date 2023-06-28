@@ -1,10 +1,9 @@
 use std::{
     ffi::OsStr,
     io::{self, Read, Write},
-    ops::RangeBounds,
+    mem,
     process::Command,
     time::Instant,
-    vec::Drain,
 };
 
 use color_eyre::eyre::Context;
@@ -115,7 +114,8 @@ pub(super) struct EventStream<S> {
     stream: S,
     prompt: String,
     events: Vec<Event>,
-    start: Instant,
+    last: Instant,
+    last_prompt: Instant,
 }
 
 impl<S: Write> Write for EventStream<S> {
@@ -137,7 +137,9 @@ impl<S: Read> Read for EventStream<S> {
         let bytes_read = self.stream.read(buf)?;
         let data = std::str::from_utf8(&buf[..bytes_read])
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        if data != self.prompt {
+        if data == self.prompt {
+            self.last_prompt = Instant::now();
+        } else {
             self.add_event(String::from(data));
         }
         Ok(bytes_read)
@@ -156,24 +158,32 @@ impl<S: NonBlocking> NonBlocking for EventStream<S> {
 
 impl<S> EventStream<S> {
     pub fn new(stream: S, prompt: String) -> Self {
+        let now = Instant::now();
         Self {
             stream,
             prompt,
             events: Vec::new(),
-            start: Instant::now(),
+            last: now,
+            last_prompt: now,
         }
     }
 
-    pub fn drain(&mut self, range: impl RangeBounds<usize>) -> Drain<Event> {
-        self.events.drain(range)
+    /// Take the events from internal buffer.
+    /// Events have times that are difference between the last event (or the reset).
+    /// Associated duration is the last time (since the previous event) the prompt was seen
+    pub fn take_events(&mut self) -> (Vec<Event>, std::time::Duration) {
+        let last_prompt = self.last_prompt.saturating_duration_since(self.last);
+        (mem::take(&mut self.events), last_prompt)
     }
 
     pub fn reset(&mut self) {
         self.events.clear();
-        self.start = Instant::now();
+        self.last = Instant::now();
     }
 
     fn add_event(&mut self, data: String) {
-        self.events.push(Event::output(self.start.elapsed(), data));
+        let now = Instant::now();
+        self.events.push(Event::output(now - self.last, data));
+        self.last = now;
     }
 }

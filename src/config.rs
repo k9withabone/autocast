@@ -5,7 +5,7 @@ use std::{
     ffi::OsStr,
     fmt::{self, Display},
     io::Read,
-    iter,
+    iter, mem,
     num::ParseIntError,
     process,
     str::FromStr,
@@ -15,6 +15,7 @@ use std::{
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
 use expectrl::ControlCode;
+use itertools::Itertools;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -78,35 +79,51 @@ impl TryFrom<Script> for asciicast::File {
         };
 
         let mut repl_session = shell
-            .spawn(
-                Some(timeout),
-                environment.iter().map(Into::into),
-                width,
-                height,
-            )
+            .spawn(Some(timeout), environment.iter().map_into(), width, height)
             .wrap_err("could not start shell")?;
 
-        let mut time = std::time::Duration::ZERO;
-        let mut events = Vec::new();
-        events.push(Event::output(time, prompt.clone()));
-        for instruction in value.instructions {
-            let output = instruction
-                .run(
-                    &mut time,
+        let type_speed = type_speed.into();
+        let events = value
+            .instructions
+            .iter()
+            .scan(std::time::Duration::ZERO, |wait_time, instruction| {
+                let events = instruction.run(
                     &prompt,
                     &secondary_prompt,
                     type_speed,
                     &line_split,
                     &mut repl_session,
-                )
-                .wrap_err("error running instruction")?;
-            events.extend(output);
-        }
-        time += type_speed.into();
-        events.push(Event::outputln(time));
+                );
+                let events = match events {
+                    Ok(events) => events,
+                    Err(error) => return Some(Err(error)),
+                };
+                if let Events::Wait(wait) = events {
+                    *wait_time += wait.into();
+                }
+                let mut events = events.peekable();
+                if *wait_time != std::time::Duration::ZERO {
+                    if let Some(event) = events.peek_mut() {
+                        event.time += mem::take(wait_time);
+                    }
+                }
+                Some(Ok(events))
+            })
+            .process_results(|events| {
+                iter::once(Event::output(std::time::Duration::ZERO, prompt.clone()))
+                    .chain(events.flatten())
+                    .chain(iter::once(Event::outputln(type_speed)))
+                    .scan(std::time::Duration::ZERO, |time, mut event| {
+                        event.time += *time;
+                        *time = event.time;
+                        Some(event)
+                    })
+                    .collect_vec()
+            })
+            .wrap_err("error running instruction")?;
         repl_session.exit().wrap_err("could not exit shell")?;
 
-        let mut env: HashMap<_, _> = environment.into_iter().map(Into::into).collect();
+        let mut env: HashMap<_, _> = environment.into_iter().map_into().collect();
         for env_var in environment_capture {
             env.entry(env_var)
                 .or_insert_with_key(|key| std::env::var(key).unwrap_or_default());
@@ -491,15 +508,15 @@ enum Instruction {
 }
 
 impl Instruction {
-    fn run(
-        self,
-        time: &mut std::time::Duration,
-        prompt: &str,
-        secondary_prompt: &str,
-        default_type_speed: Duration,
-        line_split: &str,
+    fn run<'a>(
+        &'a self,
+        prompt: &'a str,
+        secondary_prompt: &'a str,
+        default_type_speed: std::time::Duration,
+        line_split: &'a str,
         repl_session: &mut ReplSession,
-    ) -> color_eyre::Result<Vec<Event>> {
+    ) -> color_eyre::Result<Events<impl Iterator<Item = Event> + 'a, impl Iterator<Item = Event>>>
+    {
         match self {
             Self::Command {
                 command,
@@ -513,57 +530,78 @@ impl Instruction {
                     .expect_prompt()
                     .wrap_err("could not detect prompt")?;
 
-                if hidden {
-                    return Ok(Vec::new());
+                if *hidden {
+                    return Ok(Events::None);
                 }
 
-                let output = repl_session.get_stream_mut().drain(..);
+                let (output, last_prompt) = repl_session.get_stream_mut().take_events();
 
-                // capacity: command len + output + prompt
-                let mut events = Vec::with_capacity(command.len(line_split) + output.len() + 1);
+                let type_speed = type_speed.map_or(default_type_speed, Into::into);
+                let events = command
+                    .events(type_speed, secondary_prompt, line_split)
+                    .chain(output)
+                    .chain(iter::once(Event::output(last_prompt, String::from(prompt))));
 
-                let type_speed = type_speed.unwrap_or(default_type_speed).into();
-                command.add_to_events(&mut events, time, type_speed, secondary_prompt, line_split);
-
-                events.extend(output.map(|mut event| {
-                    event.time += *time;
-                    event
-                }));
-
-                repl_session.get_stream_mut().reset();
-
-                // advance time to output end
-                // TODO: add buffer between last output event and prompt
-                *time = events.last().map_or(*time, |event| event.time);
-
-                events.push(Event::output(*time, String::from(prompt)));
-
-                Ok(events)
+                Ok(Events::Command(events))
             }
             Self::Interactive {
                 command,
                 keys,
                 type_speed,
             } => todo!(),
-            Self::Wait(duration) => {
-                *time += duration.into();
-                Ok(Vec::new())
-            }
-            Self::Marker(data) => Ok(vec![Event::marker(*time, data)]),
+            Self::Wait(duration) => Ok(Events::Wait(*duration)),
+            Self::Marker(data) => Ok(Events::once(Event::marker(
+                std::time::Duration::ZERO,
+                data.clone(),
+            ))),
             Self::Clear => {
-                let type_speed = default_type_speed.into();
-
-                let mut events = Vec::with_capacity(2);
-
-                *time += type_speed;
-                events.push(Event::output(*time, String::from("\r\x1b[H\x1b[2J\x1b[3J")));
-
-                *time += type_speed;
-                events.push(Event::output(*time, String::from(prompt)));
-
-                Ok(events)
+                let clear =
+                    Event::output(default_type_speed, String::from("\r\x1b[H\x1b[2J\x1b[3J"));
+                let prompt = Event::output(default_type_speed, String::from(prompt));
+                Ok(Events::Clear([clear, prompt].into_iter()))
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Events<Co, Cl> {
+    Command(Co),
+    Clear(Cl),
+    Once(iter::Once<Event>),
+    Wait(Duration),
+    None,
+}
+
+impl<Co, Cl> Iterator for Events<Co, Cl>
+where
+    Co: Iterator<Item = Event>,
+    Cl: Iterator<Item = Event>,
+{
+    type Item = Event;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Command(iter) => iter.next(),
+            Self::Clear(iter) => iter.next(),
+            Self::Once(iter) => iter.next(),
+            Self::Wait(_) | Self::None => None,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Command(iter) => iter.size_hint(),
+            Self::Clear(iter) => iter.size_hint(),
+            Self::Once(iter) => iter.size_hint(),
+            Self::Wait(_) | Self::None => (0, Some(0)),
+        }
+    }
+}
+
+impl<Co, Cl> Events<Co, Cl> {
+    fn once(event: Event) -> Self {
+        Self::Once(iter::once(event))
     }
 }
 
@@ -575,20 +613,6 @@ enum Command {
 }
 
 impl Command {
-    fn len(&self, line_split: &str) -> usize {
-        match self {
-            Self::SingleLine(line) => line.len(),
-            Self::MultiLine(lines) => {
-                let num_lines = lines.len().saturating_sub(1);
-                // secondary prompts + line lengths + line splits
-                num_lines
-                    + lines.iter().map(String::len).sum::<usize>()
-                    + (line_split.len() * num_lines)
-            }
-            Self::Control(_) => 1,
-        }
-    }
-
     fn send(&self, repl_session: &mut ReplSession) -> color_eyre::Result<()> {
         repl_session.get_stream_mut().reset();
         match self {
@@ -601,54 +625,79 @@ impl Command {
         Ok(())
     }
 
-    fn add_to_events(
-        self,
-        events: &mut Vec<Event>,
-        time: &mut std::time::Duration,
+    fn events<'a>(
+        &'a self,
         type_speed: std::time::Duration,
-        secondary_prompt: &str,
-        line_split: &str,
-    ) {
+        secondary_prompt: &'a str,
+        line_split: &'a str,
+    ) -> impl Iterator<Item = Event> + 'a {
         match self {
-            Command::SingleLine(line) => type_line(events, time, type_speed, &line),
-            Command::MultiLine(lines) => {
-                let num_lines = lines.len();
-                for (line_num, mut line) in lines.into_iter().enumerate() {
-                    if line_num != 0 {
-                        *time += type_speed;
-                        events.push(Event::output(*time, String::from(secondary_prompt)));
-                    }
-                    if line_num + 1 < num_lines {
-                        line += line_split;
-                    }
-
-                    type_line(events, time, type_speed, &line);
-                }
+            Self::SingleLine(line) => {
+                CommandEvents::SingleLine(type_line(type_speed, line.chars()))
             }
-            Command::Control(char) => {
-                type_line(
-                    events,
-                    time,
-                    type_speed,
-                    &format!("^{}", char.to_ascii_uppercase()),
-                );
+            Self::MultiLine(lines) => {
+                let num_lines = lines.len();
+                let iter = lines.iter().enumerate().flat_map(move |(line_num, line)| {
+                    let secondary_prompt = (line_num != 0)
+                        .then(|| Event::output(type_speed, String::from(secondary_prompt)));
+
+                    let line_split = (line_num + 1 < num_lines)
+                        .then_some(line_split.chars())
+                        .into_iter()
+                        .flatten();
+
+                    secondary_prompt
+                        .into_iter()
+                        .chain(type_line(type_speed, line.chars().chain(line_split)))
+                });
+                CommandEvents::MultiLine(iter)
+            }
+            Self::Control(char) => {
+                CommandEvents::Control(type_line(type_speed, ['^', char.to_ascii_uppercase()]))
             }
         }
     }
 }
 
-fn type_line(
-    events: &mut Vec<Event>,
-    time: &mut std::time::Duration,
-    type_speed: std::time::Duration,
-    line: &str,
-) {
-    for char in line.chars() {
-        *time += type_speed;
-        events.push(Event::output(*time, String::from(char)));
+#[derive(Debug, Clone)]
+enum CommandEvents<S, M, C> {
+    SingleLine(S),
+    MultiLine(M),
+    Control(C),
+}
+
+impl<S, M, C> Iterator for CommandEvents<S, M, C>
+where
+    S: Iterator<Item = Event>,
+    M: Iterator<Item = Event>,
+    C: Iterator<Item = Event>,
+{
+    type Item = Event;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::SingleLine(iter) => iter.next(),
+            Self::MultiLine(iter) => iter.next(),
+            Self::Control(iter) => iter.next(),
+        }
     }
-    *time += type_speed;
-    events.push(Event::outputln(*time));
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::SingleLine(iter) => iter.size_hint(),
+            Self::MultiLine(iter) => iter.size_hint(),
+            Self::Control(iter) => iter.size_hint(),
+        }
+    }
+}
+
+fn type_line(
+    type_speed: std::time::Duration,
+    line: impl IntoIterator<Item = char>,
+) -> impl Iterator<Item = Event> {
+    line.into_iter()
+        .map(move |char| Event::output(type_speed, String::from(char)))
+        .chain(iter::once(Event::outputln(type_speed)))
 }
 
 #[derive(Deserialize, Debug, Clone)]
