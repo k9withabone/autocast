@@ -1,3 +1,4 @@
+mod run;
 mod spawn;
 
 use std::{
@@ -5,7 +6,7 @@ use std::{
     ffi::OsStr,
     fmt::{self, Display},
     io::Read,
-    iter, mem,
+    iter,
     num::ParseIntError,
     process,
     str::FromStr,
@@ -14,12 +15,11 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
-use expectrl::ControlCode;
 use itertools::Itertools;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::asciicast::{self, Event};
+use crate::asciicast;
 
 use self::spawn::ReplSession;
 
@@ -57,70 +57,27 @@ impl TryFrom<Script> for asciicast::File {
             timeout,
         } = value.settings;
 
-        let (width, height) = match (width, height) {
-            (None, _) | (_, None) => terminal_size::terminal_size()
-                .map(|(terminal_width, terminal_height)| {
-                    (
-                        width.unwrap_or(terminal_width.0),
-                        height.unwrap_or(terminal_height.0),
-                    )
-                })
-                .ok_or(eyre::eyre!(
-                    "terminal width or height not provided and could not get terminal size"
-                ))?,
-            (Some(width), Some(height)) => (width, height),
-        };
+        let (width, height) = terminal_size(width, height).ok_or(eyre::eyre!(
+            "terminal width or height not provided and could not get terminal size"
+        ))?;
 
         let line_split = shell.line_split().to_string();
-        let shell_env = match &shell {
-            Shell::Bash => String::from("bash"),
-            Shell::Python => String::from("python"),
-            Shell::Custom { program, .. } => program.clone(),
-        };
+        let shell_env = shell.env().to_string();
 
         let mut repl_session = shell
             .spawn(Some(timeout), environment.iter().map_into(), width, height)
             .wrap_err("could not start shell")?;
 
         let type_speed = type_speed.into();
-        let events = value
-            .instructions
-            .iter()
-            .scan(std::time::Duration::ZERO, |wait_time, instruction| {
-                let events = instruction.run(
-                    &prompt,
-                    &secondary_prompt,
-                    type_speed,
-                    &line_split,
-                    &mut repl_session,
-                );
-                let events = match events {
-                    Ok(events) => events,
-                    Err(error) => return Some(Err(error)),
-                };
-                if let Events::Wait(wait) = events {
-                    *wait_time += wait.into();
-                }
-                let mut events = events.peekable();
-                if *wait_time != std::time::Duration::ZERO {
-                    if let Some(event) = events.peek_mut() {
-                        event.time += mem::take(wait_time);
-                    }
-                }
-                Some(Ok(events))
-            })
-            .process_results(|events| {
-                iter::once(Event::output(std::time::Duration::ZERO, prompt.clone()))
-                    .chain(events.flatten())
-                    .chain(iter::once(Event::outputln(type_speed)))
-                    .scan(std::time::Duration::ZERO, |time, mut event| {
-                        event.time += *time;
-                        *time = event.time;
-                        Some(event)
-                    })
-                    .collect_vec()
-            })
-            .wrap_err("error running instruction")?;
+        let events = run::instructions(
+            &value.instructions,
+            &prompt,
+            &secondary_prompt,
+            type_speed,
+            &line_split,
+            &mut repl_session,
+        )
+        .wrap_err("error running instructions")?;
         repl_session.exit().wrap_err("could not exit shell")?;
 
         let mut env: HashMap<_, _> = environment.into_iter().map_into().collect();
@@ -143,6 +100,20 @@ impl TryFrom<Script> for asciicast::File {
             },
             events,
         })
+    }
+}
+
+fn terminal_size(width: Option<u16>, height: Option<u16>) -> Option<(u16, u16)> {
+    match (width, height) {
+        (Some(width), Some(height)) => Some((width, height)),
+        (None, _) | (_, None) => {
+            terminal_size::terminal_size().map(|(terminal_width, terminal_height)| {
+                (
+                    width.unwrap_or(terminal_width.0),
+                    height.unwrap_or(terminal_height.0),
+                )
+            })
+        }
     }
 }
 
@@ -367,6 +338,14 @@ impl Shell {
         }
     }
 
+    fn env(&self) -> &str {
+        match self {
+            Self::Bash => "bash",
+            Self::Python => "python",
+            Self::Custom { program, .. } => program,
+        }
+    }
+
     fn spawn<I, K, V>(
         self,
         timeout: Option<Duration>,
@@ -507,197 +486,11 @@ enum Instruction {
     Clear,
 }
 
-impl Instruction {
-    fn run<'a>(
-        &'a self,
-        prompt: &'a str,
-        secondary_prompt: &'a str,
-        default_type_speed: std::time::Duration,
-        line_split: &'a str,
-        repl_session: &mut ReplSession,
-    ) -> color_eyre::Result<Events<impl Iterator<Item = Event> + 'a, impl Iterator<Item = Event>>>
-    {
-        match self {
-            Self::Command {
-                command,
-                hidden,
-                type_speed,
-            } => {
-                command
-                    .send(repl_session)
-                    .wrap_err("could not send command to shell")?;
-                repl_session
-                    .expect_prompt()
-                    .wrap_err("could not detect prompt")?;
-
-                if *hidden {
-                    return Ok(Events::None);
-                }
-
-                let (output, last_prompt) = repl_session.get_stream_mut().take_events();
-
-                let type_speed = type_speed.map_or(default_type_speed, Into::into);
-                let events = command
-                    .events(type_speed, secondary_prompt, line_split)
-                    .chain(output)
-                    .chain(iter::once(Event::output(last_prompt, String::from(prompt))));
-
-                Ok(Events::Command(events))
-            }
-            Self::Interactive {
-                command,
-                keys,
-                type_speed,
-            } => todo!(),
-            Self::Wait(duration) => Ok(Events::Wait(*duration)),
-            Self::Marker(data) => Ok(Events::once(Event::marker(
-                std::time::Duration::ZERO,
-                data.clone(),
-            ))),
-            Self::Clear => {
-                let clear =
-                    Event::output(default_type_speed, String::from("\r\x1b[H\x1b[2J\x1b[3J"));
-                let prompt = Event::output(default_type_speed, String::from(prompt));
-                Ok(Events::Clear([clear, prompt].into_iter()))
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Events<Co, Cl> {
-    Command(Co),
-    Clear(Cl),
-    Once(iter::Once<Event>),
-    Wait(Duration),
-    None,
-}
-
-impl<Co, Cl> Iterator for Events<Co, Cl>
-where
-    Co: Iterator<Item = Event>,
-    Cl: Iterator<Item = Event>,
-{
-    type Item = Event;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Command(iter) => iter.next(),
-            Self::Clear(iter) => iter.next(),
-            Self::Once(iter) => iter.next(),
-            Self::Wait(_) | Self::None => None,
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::Command(iter) => iter.size_hint(),
-            Self::Clear(iter) => iter.size_hint(),
-            Self::Once(iter) => iter.size_hint(),
-            Self::Wait(_) | Self::None => (0, Some(0)),
-        }
-    }
-}
-
-impl<Co, Cl> Events<Co, Cl> {
-    fn once(event: Event) -> Self {
-        Self::Once(iter::once(event))
-    }
-}
-
 #[derive(Deserialize, Debug, Clone)]
 enum Command {
     SingleLine(String),
     MultiLine(Vec<String>),
     Control(char),
-}
-
-impl Command {
-    fn send(&self, repl_session: &mut ReplSession) -> color_eyre::Result<()> {
-        repl_session.get_stream_mut().reset();
-        match self {
-            Self::SingleLine(line) => repl_session.send_line(line)?,
-            Self::MultiLine(lines) => repl_session.send_line(&lines.join(" "))?,
-            Self::Control(char) => repl_session.send(
-                ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
-            )?,
-        }
-        Ok(())
-    }
-
-    fn events<'a>(
-        &'a self,
-        type_speed: std::time::Duration,
-        secondary_prompt: &'a str,
-        line_split: &'a str,
-    ) -> impl Iterator<Item = Event> + 'a {
-        match self {
-            Self::SingleLine(line) => {
-                CommandEvents::SingleLine(type_line(type_speed, line.chars()))
-            }
-            Self::MultiLine(lines) => {
-                let num_lines = lines.len();
-                let iter = lines.iter().enumerate().flat_map(move |(line_num, line)| {
-                    let secondary_prompt = (line_num != 0)
-                        .then(|| Event::output(type_speed, String::from(secondary_prompt)));
-
-                    let line_split = (line_num + 1 < num_lines)
-                        .then_some(line_split.chars())
-                        .into_iter()
-                        .flatten();
-
-                    secondary_prompt
-                        .into_iter()
-                        .chain(type_line(type_speed, line.chars().chain(line_split)))
-                });
-                CommandEvents::MultiLine(iter)
-            }
-            Self::Control(char) => {
-                CommandEvents::Control(type_line(type_speed, ['^', char.to_ascii_uppercase()]))
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum CommandEvents<S, M, C> {
-    SingleLine(S),
-    MultiLine(M),
-    Control(C),
-}
-
-impl<S, M, C> Iterator for CommandEvents<S, M, C>
-where
-    S: Iterator<Item = Event>,
-    M: Iterator<Item = Event>,
-    C: Iterator<Item = Event>,
-{
-    type Item = Event;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::SingleLine(iter) => iter.next(),
-            Self::MultiLine(iter) => iter.next(),
-            Self::Control(iter) => iter.next(),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::SingleLine(iter) => iter.size_hint(),
-            Self::MultiLine(iter) => iter.size_hint(),
-            Self::Control(iter) => iter.size_hint(),
-        }
-    }
-}
-
-fn type_line(
-    type_speed: std::time::Duration,
-    line: impl IntoIterator<Item = char>,
-) -> impl Iterator<Item = Event> {
-    line.into_iter()
-        .map(move |char| Event::output(type_speed, String::from(char)))
-        .chain(iter::once(Event::outputln(type_speed)))
 }
 
 #[derive(Deserialize, Debug, Clone)]
