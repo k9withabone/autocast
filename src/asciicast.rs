@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt::{self, Display},
+    io::{self, Write},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,19 +15,63 @@ pub struct File {
     pub events: Vec<Event>,
 }
 
-impl Display for File {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn to_json_string<T: ?Sized + Serialize>(t: &T) -> Result<String, fmt::Error> {
-            serde_json::to_string(t).map_err(|_| fmt::Error)
-        }
-
-        writeln!(f, "{}", to_json_string(&self.header)?)?;
+impl File {
+    pub fn write(&self, mut writer: impl Write) -> io::Result<()> {
+        self.header.serialize(&mut serializer(&mut writer))?;
+        writeln!(writer)?;
 
         for event in &self.events {
-            writeln!(f, "{}", to_json_string(event)?)?;
+            event.serialize(&mut serializer(&mut writer))?;
+            writeln!(writer)?;
         }
 
-        Ok(())
+        writer.flush()
+    }
+}
+
+fn serializer<W: Write>(writer: W) -> serde_json::Serializer<W, Formatter> {
+    serde_json::Serializer::with_formatter(writer, Formatter)
+}
+
+/// Formatter to match the output of `asciinema rec`
+#[derive(Debug)]
+struct Formatter;
+
+impl serde_json::ser::Formatter for Formatter {
+    fn write_f64<W>(&mut self, writer: &mut W, value: f64) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        write!(writer, "{value:.6}")
+    }
+
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        if first {
+            Ok(())
+        } else {
+            writer.write_all(b", ")
+        }
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> io::Result<()>
+    where
+        W: ?Sized + io::Write,
+    {
+        writer.write_all(b": ")
     }
 }
 

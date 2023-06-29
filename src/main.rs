@@ -5,7 +5,7 @@ mod config;
 
 use std::{
     fs,
-    io::{BufReader, BufWriter, Write},
+    io::{BufReader, BufWriter},
     path::PathBuf,
 };
 
@@ -32,12 +32,10 @@ fn main() -> color_eyre::Result<()> {
         .open(cli.out_file)
         .wrap_err("could not create/open output file")
         .suggestion("use `--overwrite` if you wish to replace an existing file")?;
-    let mut out_file = BufWriter::new(out_file);
 
     let cast = asciicast::File::try_from(script).wrap_err("error running script")?;
-
-    write!(out_file, "{cast}").wrap_err("could not write to output file")?;
-    out_file.flush()?;
+    cast.write(BufWriter::new(out_file))
+        .wrap_err("could not write to output file")?;
 
     Ok(())
 }
