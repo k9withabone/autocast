@@ -62,7 +62,11 @@ impl TryFrom<Script> for asciicast::File {
         ))?;
 
         let line_split = shell.line_split().to_string();
-        let shell_env = shell.env().to_string();
+        let program = shell.program();
+        let shell_env = which::which(program).map_or_else(
+            |_| String::from(program),
+            |program| program.to_string_lossy().into_owned(),
+        );
 
         let mut shell_session = shell
             .spawn(timeout.into(), environment.iter().map_into(), width, height)
@@ -336,7 +340,7 @@ impl Shell {
         }
     }
 
-    fn env(&self) -> &str {
+    fn program(&self) -> &str {
         match self {
             Self::Bash => "bash",
             Self::Python => "python",
