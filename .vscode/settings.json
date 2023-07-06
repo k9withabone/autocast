@@ -9,6 +9,7 @@
         "outputln",
         "peekable",
         "rcfile",
-        "shlex"
+        "shlex",
+        "thiserror"
     ]
 }

@@ -6,7 +6,7 @@ use itertools::Itertools;
 
 use crate::asciicast::Event;
 
-use super::{spawn::ReplSession, Command, Instruction};
+use super::{spawn::ShellSession, Command, Instruction};
 
 pub(super) fn instructions<'a, T: FromIterator<Event>>(
     instructions: impl IntoIterator<Item = &'a Instruction>,
@@ -14,7 +14,7 @@ pub(super) fn instructions<'a, T: FromIterator<Event>>(
     secondary_prompt: &str,
     type_speed: Duration,
     line_split: &str,
-    repl_session: &mut ReplSession,
+    shell_session: &mut ShellSession,
 ) -> color_eyre::Result<T> {
     instructions
         .into_iter()
@@ -24,7 +24,7 @@ pub(super) fn instructions<'a, T: FromIterator<Event>>(
                 secondary_prompt,
                 type_speed,
                 line_split,
-                repl_session,
+                shell_session,
             );
             let events = match events {
                 Ok(events) => events,
@@ -61,7 +61,7 @@ impl Instruction {
         secondary_prompt: &'a str,
         default_type_speed: Duration,
         line_split: &'a str,
-        repl_session: &mut ReplSession,
+        shell_session: &mut ShellSession,
     ) -> color_eyre::Result<Events<impl Iterator<Item = Event> + 'a, impl Iterator<Item = Event>>>
     {
         match self {
@@ -71,17 +71,15 @@ impl Instruction {
                 type_speed,
             } => {
                 command
-                    .send(repl_session)
+                    .send(shell_session)
                     .wrap_err("could not send command to shell")?;
-                repl_session
-                    .expect_prompt()
-                    .wrap_err("could not detect prompt")?;
+                let (output, last_prompt) = shell_session
+                    .read_until_prompt()
+                    .wrap_err("could not read shell output")?;
 
                 if *hidden {
                     return Ok(Events::None);
                 }
-
-                let (output, last_prompt) = repl_session.get_stream_mut().take_events();
 
                 let type_speed = type_speed.map_or(default_type_speed, Into::into);
                 let events = command
@@ -150,12 +148,12 @@ impl<Co, Cl> Events<Co, Cl> {
 }
 
 impl Command {
-    fn send(&self, repl_session: &mut ReplSession) -> color_eyre::Result<()> {
-        repl_session.get_stream_mut().reset();
+    fn send(&self, shell_session: &mut ShellSession) -> color_eyre::Result<()> {
+        shell_session.reset();
         match self {
-            Self::SingleLine(line) => repl_session.send_line(line)?,
-            Self::MultiLine(lines) => repl_session.send_line(&lines.join(" "))?,
-            Self::Control(char) => repl_session.send(
+            Self::SingleLine(line) => shell_session.send_line(line)?,
+            Self::MultiLine(lines) => shell_session.send_line(&lines.join(" "))?,
+            Self::Control(char) => shell_session.send(
                 ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
             )?,
         }

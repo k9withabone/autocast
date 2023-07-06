@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::asciicast;
 
-use self::spawn::ReplSession;
+use self::spawn::ShellSession;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Script {
@@ -64,8 +64,8 @@ impl TryFrom<Script> for asciicast::File {
         let line_split = shell.line_split().to_string();
         let shell_env = shell.env().to_string();
 
-        let mut repl_session = shell
-            .spawn(Some(timeout), environment.iter().map_into(), width, height)
+        let mut shell_session = shell
+            .spawn(timeout.into(), environment.iter().map_into(), width, height)
             .wrap_err("could not start shell")?;
 
         let type_speed = type_speed.into();
@@ -75,10 +75,10 @@ impl TryFrom<Script> for asciicast::File {
             &secondary_prompt,
             type_speed,
             &line_split,
-            &mut repl_session,
+            &mut shell_session,
         )
         .wrap_err("error running instructions")?;
-        repl_session.exit().wrap_err("could not exit shell")?;
+        shell_session.quit().wrap_err("could not exit shell")?;
 
         let mut env: HashMap<_, _> = environment.into_iter().map_into().collect();
         for env_var in environment_capture {
@@ -298,8 +298,6 @@ enum Shell {
         line_split: String,
         #[serde(default)]
         quit_command: Option<String>,
-        #[serde(default)]
-        echo: bool,
     },
 }
 
@@ -348,11 +346,11 @@ impl Shell {
 
     fn spawn<I, K, V>(
         self,
-        timeout: Option<Duration>,
+        timeout: std::time::Duration,
         environment: I,
         width: u16,
         height: u16,
-    ) -> color_eyre::Result<ReplSession>
+    ) -> color_eyre::Result<ShellSession>
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<OsStr>,
@@ -367,11 +365,10 @@ impl Shell {
                 prompt,
                 line_split: _,
                 quit_command,
-                echo,
             } => {
                 let mut command = process::Command::new(program);
                 command.args(args).envs(environment);
-                spawn::custom(command, timeout, width, height, prompt, quit_command, echo)
+                ShellSession::spawn(command, width, height, prompt, quit_command, timeout)
             }
         }
     }

@@ -134,7 +134,7 @@ impl Header {
     const VERSION: u8 = 2;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub time: Duration,
     pub event_type: EventType,
@@ -187,7 +187,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventType {
     Input,
     Output,
