@@ -1,4 +1,4 @@
-use std::{iter, mem, time::Duration};
+use std::{iter, mem, thread, time::Duration};
 
 use color_eyre::eyre::{self, Context};
 use expectrl::ControlCode;
@@ -6,7 +6,7 @@ use itertools::Itertools;
 
 use crate::asciicast::Event;
 
-use super::{spawn::ShellSession, Command, Instruction};
+use super::{spawn::ShellSession, Command, Instruction, Key};
 
 pub(super) fn instructions<'a, T: FromIterator<Event>>(
     instructions: impl IntoIterator<Item = &'a Instruction>,
@@ -73,7 +73,7 @@ impl Instruction {
                 command
                     .send(shell_session)
                     .wrap_err("could not send command to shell")?;
-                let (output, last_prompt) = shell_session
+                let mut output = shell_session
                     .read_until_prompt()
                     .wrap_err("could not read shell output")?;
 
@@ -81,11 +81,11 @@ impl Instruction {
                     return Ok(Events::None);
                 }
 
+                output.push(shell_session.new_event(String::from(prompt)));
                 let type_speed = type_speed.map_or(default_type_speed, Into::into);
                 let events = command
                     .events(type_speed, secondary_prompt, line_split)
-                    .chain(output)
-                    .chain(iter::once(Event::output(last_prompt, String::from(prompt))));
+                    .chain(output);
 
                 Ok(Events::Command(events))
             }
@@ -93,7 +93,21 @@ impl Instruction {
                 command,
                 keys,
                 type_speed,
-            } => todo!(),
+            } => {
+                command
+                    .send(shell_session)
+                    .wrap_err("could not send command to shell")?;
+
+                let type_speed = type_speed.map_or(default_type_speed, Into::into);
+                let mut output = keys_to_events(keys, type_speed, shell_session)?;
+
+                output.push(shell_session.new_event(String::from(prompt)));
+                let events = command
+                    .events(type_speed, secondary_prompt, line_split)
+                    .chain(output);
+
+                Ok(Events::Command(events))
+            }
             Self::Wait(duration) => Ok(Events::Wait(*duration)),
             Self::Marker(data) => Ok(Events::once(Event::marker(Duration::ZERO, data.clone()))),
             Self::Clear => {
@@ -104,6 +118,45 @@ impl Instruction {
             }
         }
     }
+}
+
+fn keys_to_events(
+    keys: &[Key],
+    type_speed: Duration,
+    shell_session: &mut ShellSession,
+) -> color_eyre::Result<Vec<Event>> {
+    let (first, mut prompt_seen) = shell_session.read().wrap_err("could not read from shell")?;
+
+    let output = keys
+        .iter()
+        .map_while(|key| {
+            if prompt_seen {
+                return None;
+            }
+            let result = key
+                .send(shell_session)
+                .wrap_err("could not send key to shell")
+                .and_then(|_| {
+                    thread::sleep(type_speed);
+                    let (event, prompt) =
+                        shell_session.read().wrap_err("could not read from shell")?;
+                    prompt_seen = prompt;
+                    Ok(event)
+                });
+            Some(result)
+        })
+        .filter_map(Result::transpose);
+    thread::sleep(type_speed);
+    let mut output: Vec<_> = first.map(Ok).into_iter().chain(output).try_collect()?;
+
+    if !prompt_seen {
+        let events = shell_session
+            .read_until_prompt()
+            .wrap_err("could not read prompt from shell")?;
+        output.extend(events);
+    }
+
+    Ok(output)
 }
 
 #[derive(Debug, Clone)]
@@ -232,5 +285,18 @@ where
             Self::MultiLine(iter) => iter.size_hint(),
             Self::Control(iter) => iter.size_hint(),
         }
+    }
+}
+
+impl Key {
+    fn send(&self, shell_session: &mut ShellSession) -> color_eyre::Result<()> {
+        match self {
+            Self::Char(char) => shell_session.send([*char as u8])?,
+            Self::Control(char) => shell_session.send(
+                ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
+            )?,
+            Self::Wait(duration) => thread::sleep(Duration::from(*duration)),
+        }
+        Ok(())
     }
 }

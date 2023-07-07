@@ -84,7 +84,8 @@ pub struct ShellSession<P = OsProcess, S = OsProcessStream> {
 }
 
 impl<P, S> ShellSession<P, S> {
-    fn new_event(&mut self, data: String) -> Event {
+    /// Creates a new [`Event`], updating when the last event occurred to now
+    pub fn new_event(&mut self, data: String) -> Event {
         let now = Instant::now();
         let event = Event::output(now - self.last_event, data);
         self.last_event = now;
@@ -115,7 +116,9 @@ impl<P, S: Read> ShellSession<P, S> {
             last_event: now,
         }
     }
+}
 
+impl<P, S: Read + NonBlocking> ShellSession<P, S> {
     /// Reads the shell's output, adding it to the event buffer.
     /// Returns whether the prompt was detected.
     pub fn read(&mut self) -> io::Result<(Option<Event>, bool)> {
@@ -141,14 +144,14 @@ impl<P, S: Read> ShellSession<P, S> {
     ///
     /// Returns an error if the timeout is surpassed or there was an IO error
     /// while reading the shell output.
-    pub fn read_until_prompt(&mut self) -> color_eyre::Result<(Vec<Event>, Duration)> {
+    pub fn read_until_prompt(&mut self) -> color_eyre::Result<Vec<Event>> {
         let start = Instant::now();
         let mut events = Vec::new();
         loop {
             let (event, prompt) = self.read().wrap_err("error reading shell output")?;
             events.extend(event);
             if prompt {
-                return Ok((events, self.last_event.elapsed()));
+                return Ok(events);
             }
             if start.elapsed() > self.timeout {
                 eyre::bail!("timeout elapsed");
@@ -178,7 +181,7 @@ impl<P, S: Write> ShellSession<P, S> {
 
 impl<P: Process + WindowSize> ShellSession<P, P::Stream>
 where
-    P::Stream: Read,
+    P::Stream: Read + NonBlocking,
 {
     /// Spawn a new [`ShellSession`] from a [`Command`].
     /// Blocks until the shell's prompt is read.
@@ -318,13 +321,25 @@ impl<S: Read> Stream<S> {
     fn new(inner: S) -> Self {
         Self {
             inner: BufReader::new(inner),
-            buffer: vec![0; 2048],
+            buffer: vec![0; 1024],
         }
     }
+}
 
+impl<S: Read + NonBlocking> Stream<S> {
     fn read_to_string(&mut self) -> io::Result<String> {
-        let bytes_read = self.inner.read(&mut self.buffer)?;
-        let string = OsStr::assert_from_raw_bytes(&self.buffer[..bytes_read]);
+        let mut string = Vec::new();
+        self.set_non_blocking()?;
+        loop {
+            match self.inner.read(&mut self.buffer) {
+                Ok(0) => break,
+                Ok(bytes_read) => string.extend_from_slice(&self.buffer[..bytes_read]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        }
+        self.set_blocking()?;
+        let string = OsStr::assert_from_raw_bytes(string);
         Ok(string.to_string_lossy().into())
     }
 }
@@ -347,8 +362,30 @@ mod tests {
         )
     }
 
-    fn empty_stream() -> ShellSession<(), io::Empty> {
-        ShellSession::new(String::new(), None, Duration::ZERO, (), io::empty())
+    struct AlwaysNonBlocking<T>(T);
+
+    impl<T: Read> Read for AlwaysNonBlocking<T> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl<T> NonBlocking for AlwaysNonBlocking<T> {
+        fn set_non_blocking(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_blocking(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn non_blocking<S: Read>(prompt: String, stream: S) -> ShellSession<(), AlwaysNonBlocking<S>> {
+        ShellSession::new(prompt, None, Duration::ZERO, (), AlwaysNonBlocking(stream))
+    }
+
+    fn empty_stream() -> ShellSession<(), AlwaysNonBlocking<io::Empty>> {
+        non_blocking(String::new(), io::empty())
     }
 
     fn test_bytes() -> Cow<'static, [u8]> {
@@ -361,7 +398,7 @@ mod tests {
         let mut shell_session = bash()?;
         shell_session.reset();
         shell_session.send_line("echo test && sleep 0.01")?;
-        let (output, last_prompt) = shell_session.read_until_prompt()?;
+        let output = shell_session.read_until_prompt()?;
         shell_session.quit()?;
         let output: Vec<_> = output
             .into_iter()
@@ -371,7 +408,7 @@ mod tests {
             })
             .collect();
         assert_eq!(output, ["test\r\n"]);
-        assert!(last_prompt > Duration::from_millis(10));
+        assert!(shell_session.last_event.elapsed() > Duration::from_millis(10));
         Ok(())
     }
 
@@ -395,13 +432,7 @@ mod tests {
     #[test]
     fn read_no_prompt() {
         let bytes = test_bytes();
-        let mut shell_session = ShellSession::new(
-            String::from("PROMPT"),
-            None,
-            Duration::ZERO,
-            (),
-            bytes.as_ref(),
-        );
+        let mut shell_session = non_blocking(String::from("PROMPT"), bytes.as_ref());
         let (event, prompt) = shell_session.read().unwrap();
         let event = event.unwrap();
         assert!(!event.time.is_zero());
@@ -412,8 +443,7 @@ mod tests {
     #[test]
     fn read_prompt_only() {
         let bytes = test_bytes();
-        let mut shell_session =
-            ShellSession::new(String::from(TEST), None, Duration::ZERO, (), bytes.as_ref());
+        let mut shell_session = non_blocking(String::from(TEST), bytes.as_ref());
         assert_eq!(shell_session.read().unwrap(), (None, true));
     }
 
@@ -421,13 +451,7 @@ mod tests {
     fn read_output_and_prompt() {
         let output = "output";
         let bytes = [OsStr::new(output).to_raw_bytes(), test_bytes()].concat();
-        let mut shell_session = ShellSession::new(
-            String::from(TEST),
-            None,
-            Duration::ZERO,
-            (),
-            bytes.as_slice(),
-        );
+        let mut shell_session = non_blocking(String::from(TEST), bytes.as_slice());
         let (event, prompt) = shell_session.read().unwrap();
         let event = event.unwrap();
         assert!(!event.time.is_zero());
@@ -438,7 +462,7 @@ mod tests {
     #[test]
     fn stream_read_to_string() {
         let bytes = test_bytes();
-        let mut stream = Stream::new(bytes.as_ref());
+        let mut stream = Stream::new(AlwaysNonBlocking(bytes.as_ref()));
         assert_eq!(stream.read_to_string().unwrap(), TEST);
     }
 }
