@@ -21,7 +21,7 @@ fn main() -> color_eyre::Result<()> {
 
     let in_file = fs::File::open(cli.in_file).wrap_err("could not open input file")?;
 
-    let mut script = Script::try_from_ron(BufReader::new(in_file))
+    let mut script = Script::try_from_yaml(BufReader::new(in_file))
         .wrap_err("could not parse input file as Script")?;
     script.merge_settings(cli.settings);
 
@@ -50,7 +50,7 @@ struct Cli {
     #[arg(long)]
     overwrite: bool,
 
-    /// Input RON file to create the asciicast file with
+    /// Input file to create the asciicast file with
     in_file: PathBuf,
 
     /// Output asciicast file

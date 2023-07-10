@@ -31,8 +31,8 @@ pub struct Script {
 }
 
 impl Script {
-    pub fn try_from_ron(reader: impl Read) -> ron::error::SpannedResult<Self> {
-        ron::de::from_reader(reader)
+    pub fn try_from_yaml(reader: impl Read) -> serde_yaml::Result<Self> {
+        serde_yaml::from_reader(reader)
     }
 
     pub fn merge_settings(&mut self, other_settings: Settings) {
@@ -482,7 +482,7 @@ enum Instruction {
         #[serde(default)]
         type_speed: Option<Duration>,
     },
-    Wait(Duration),
+    Wait(#[serde(with = "serde_yaml::with::singleton_map")] Duration),
     Marker(String),
     Clear,
 }
@@ -498,7 +498,7 @@ enum Command {
 enum Key {
     Char(char),
     Control(char),
-    Wait(Duration),
+    Wait(#[serde(with = "serde_yaml::with::singleton_map")] Duration),
 }
 
 trait Merge {
