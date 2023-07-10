@@ -1,3 +1,4 @@
+mod duration;
 mod run;
 mod spawn;
 
@@ -6,18 +7,14 @@ use std::{
     ffi::OsStr,
     fmt::{self, Display},
     io::Read,
-    iter,
-    num::ParseIntError,
-    process,
-    str::FromStr,
-    time::SystemTime,
+    iter, process,
+    time::{Duration, SystemTime},
 };
 
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
 use itertools::Itertools;
 use serde::Deserialize;
-use thiserror::Error;
 
 use crate::asciicast;
 
@@ -69,10 +66,9 @@ impl TryFrom<Script> for asciicast::File {
         );
 
         let mut shell_session = shell
-            .spawn(timeout.into(), environment.iter().map_into(), width, height)
+            .spawn(timeout, environment.iter().map_into(), width, height)
             .wrap_err("could not start shell")?;
 
-        let type_speed = type_speed.into();
         let events = run::instructions(
             &value.instructions,
             &prompt,
@@ -180,8 +176,8 @@ pub struct Settings {
     /// Can be specified in seconds (s), milliseconds (ms), or microseconds (us)
     ///
     /// Use integers and the above abbreviations when specifying, i.e. "1s", "150ms", or "900us"
-    #[arg(short = 'd', long, visible_alias = "delay", default_value_t = default_type_speed())]
-    #[serde(default = "default_type_speed")]
+    #[arg(short = 'd', long, visible_alias = "delay", default_value = DEFAULT_TYPE_SPEED, value_parser = duration::parse)]
+    #[serde(default = "default_type_speed", with = "duration")]
     type_speed: Duration,
 
     /// The shell prompt to use in the asciicast output
@@ -199,13 +195,15 @@ pub struct Settings {
     /// Can be specified in seconds (s), milliseconds (ms), or microseconds (us)
     ///
     /// Use integers and the above abbreviations when specifying, i.e. "1s", "150ms", or "900us"
-    #[arg(long, default_value_t = default_timeout())]
-    #[serde(default = "default_timeout")]
+    #[arg(long, default_value = DEFAULT_TIMEOUT, value_parser = duration::parse)]
+    #[serde(default = "default_timeout", with = "duration")]
     timeout: Duration,
 }
 
+const DEFAULT_TYPE_SPEED_MILLIS: u64 = 100;
+const DEFAULT_TYPE_SPEED: &str = "100ms";
 const fn default_type_speed() -> Duration {
-    Duration::Milliseconds(100)
+    Duration::from_millis(DEFAULT_TYPE_SPEED_MILLIS)
 }
 
 const DEFAULT_PROMPT: &str = "$ ";
@@ -218,8 +216,10 @@ fn default_secondary_prompt() -> String {
     String::from(DEFAULT_SECONDARY_PROMPT)
 }
 
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_TIMEOUT: &str = "30s";
 const fn default_timeout() -> Duration {
-    Duration::Seconds(30)
+    Duration::from_secs(DEFAULT_TIMEOUT_SECS)
 }
 
 impl Merge for Settings {
@@ -350,7 +350,7 @@ impl Shell {
 
     fn spawn<I, K, V>(
         self,
-        timeout: std::time::Duration,
+        timeout: Duration,
         environment: I,
         width: u16,
         height: u16,
@@ -412,77 +412,22 @@ impl<'a> From<&'a EnvVar> for (&'a String, &'a String) {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
-enum Duration {
-    Seconds(u64),
-    Milliseconds(u64),
-    Microseconds(u64),
-}
-
-impl Display for Duration {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Seconds(s) => write!(f, "{s}s"),
-            Self::Milliseconds(ms) => write!(f, "{ms}ms"),
-            Self::Microseconds(us) => write!(f, "{us}us"),
-        }
-    }
-}
-
-impl FromStr for Duration {
-    type Err = ParseDurationError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.contains(char::is_whitespace) {
-            Err(ParseDurationError::ContainsWhitespace)
-        } else if let Some(ms) = s.strip_suffix("ms") {
-            Ok(Self::Milliseconds(ms.parse()?))
-        } else if let Some(us) = s.strip_suffix("us") {
-            Ok(Self::Microseconds(us.parse()?))
-        } else if let Some(s) = s.strip_suffix('s') {
-            Ok(Self::Seconds(s.parse()?))
-        } else {
-            Err(ParseDurationError::UnknownUnit)
-        }
-    }
-}
-
-#[derive(Error, Debug)]
-enum ParseDurationError {
-    #[error("the duration cannot contain whitespace")]
-    ContainsWhitespace,
-    #[error("the duration has an unknown unit, must be: s, ms, or us")]
-    UnknownUnit,
-    #[error("the duration could not be parsed as an integer")]
-    InvalidInt(#[from] ParseIntError),
-}
-
-impl From<Duration> for std::time::Duration {
-    fn from(value: Duration) -> Self {
-        match value {
-            Duration::Seconds(s) => Self::from_secs(s),
-            Duration::Milliseconds(ms) => Self::from_millis(ms),
-            Duration::Microseconds(us) => Self::from_micros(us),
-        }
-    }
-}
-
 #[derive(Deserialize, Debug, Clone)]
 enum Instruction {
     Command {
         command: Command,
         #[serde(default)]
         hidden: bool,
-        #[serde(default)]
+        #[serde(default, with = "duration::option")]
         type_speed: Option<Duration>,
     },
     Interactive {
         command: Command,
         keys: Vec<Key>,
-        #[serde(default)]
+        #[serde(default, with = "duration::option")]
         type_speed: Option<Duration>,
     },
-    Wait(#[serde(with = "serde_yaml::with::singleton_map")] Duration),
+    Wait(#[serde(with = "duration")] Duration),
     Marker(String),
     Clear,
 }
@@ -498,7 +443,7 @@ enum Command {
 enum Key {
     Char(char),
     Control(char),
-    Wait(#[serde(with = "serde_yaml::with::singleton_map")] Duration),
+    Wait(#[serde(with = "duration")] Duration),
 }
 
 trait Merge {

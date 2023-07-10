@@ -31,10 +31,10 @@ pub(super) fn instructions<'a, T: FromIterator<Event>>(
                 Err(error) => return Some(Err(error)),
             };
             if let Events::Wait(wait) = events {
-                *wait_time += wait.into();
+                *wait_time += wait;
             }
             let mut events = events.peekable();
-            if *wait_time != Duration::ZERO {
+            if !wait_time.is_zero() {
                 if let Some(event) = events.peek_mut() {
                     event.time += mem::take(wait_time);
                 }
@@ -82,7 +82,7 @@ impl Instruction {
                 }
 
                 output.push(shell_session.new_event(String::from(prompt)));
-                let type_speed = type_speed.map_or(default_type_speed, Into::into);
+                let type_speed = type_speed.unwrap_or(default_type_speed);
                 let events = command
                     .events(type_speed, secondary_prompt, line_split)
                     .chain(output);
@@ -164,7 +164,7 @@ enum Events<Co, Cl> {
     Command(Co),
     Clear(Cl),
     Once(iter::Once<Event>),
-    Wait(super::Duration),
+    Wait(Duration),
     None,
 }
 
@@ -295,7 +295,7 @@ impl Key {
             Self::Control(char) => shell_session.send(
                 ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
             )?,
-            Self::Wait(duration) => thread::sleep(Duration::from(*duration)),
+            Self::Wait(duration) => thread::sleep(*duration),
         }
         Ok(())
     }
