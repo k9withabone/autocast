@@ -1,4 +1,4 @@
-mod duration;
+mod de;
 mod run;
 mod spawn;
 
@@ -14,7 +14,7 @@ use std::{
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
 use itertools::Itertools;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::asciicast;
 
@@ -176,8 +176,8 @@ pub struct Settings {
     /// Can be specified in seconds (s), milliseconds (ms), or microseconds (us)
     ///
     /// Use integers and the above abbreviations when specifying, i.e. "1s", "150ms", or "900us"
-    #[arg(short = 'd', long, visible_alias = "delay", default_value = DEFAULT_TYPE_SPEED, value_parser = duration::parse)]
-    #[serde(default = "default_type_speed", with = "duration")]
+    #[arg(short = 'd', long, visible_alias = "delay", default_value = DEFAULT_TYPE_SPEED, value_parser = de::duration::parse)]
+    #[serde(default = "default_type_speed", with = "de::duration")]
     type_speed: Duration,
 
     /// The shell prompt to use in the asciicast output
@@ -195,8 +195,8 @@ pub struct Settings {
     /// Can be specified in seconds (s), milliseconds (ms), or microseconds (us)
     ///
     /// Use integers and the above abbreviations when specifying, i.e. "1s", "150ms", or "900us"
-    #[arg(long, default_value = DEFAULT_TIMEOUT, value_parser = duration::parse)]
-    #[serde(default = "default_timeout", with = "duration")]
+    #[arg(long, default_value = DEFAULT_TIMEOUT, value_parser = de::duration::parse)]
+    #[serde(default = "default_timeout", with = "de::duration")]
     timeout: Duration,
 }
 
@@ -289,25 +289,24 @@ impl Default for Settings {
     }
 }
 
-#[derive(Deserialize, ValueEnum, Debug, Clone, PartialEq)]
+#[derive(ValueEnum, Debug, Default, Clone, PartialEq)]
 enum Shell {
+    #[default]
     Bash,
     Python,
     #[value(skip)]
     Custom {
         program: String,
-        #[serde(default)]
         args: Vec<String>,
         prompt: String,
         line_split: String,
-        #[serde(default)]
         quit_command: Option<String>,
     },
 }
 
-impl Default for Shell {
-    fn default() -> Self {
-        Self::Bash
+impl<'de> Deserialize<'de> for Shell {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(de::shell::Visitor)
     }
 }
 
@@ -418,16 +417,16 @@ enum Instruction {
         command: Command,
         #[serde(default)]
         hidden: bool,
-        #[serde(default, with = "duration::option")]
+        #[serde(default, with = "de::duration::option")]
         type_speed: Option<Duration>,
     },
     Interactive {
         command: Command,
         keys: Vec<Key>,
-        #[serde(default, with = "duration::option")]
+        #[serde(default, with = "de::duration::option")]
         type_speed: Option<Duration>,
     },
-    Wait(#[serde(with = "duration")] Duration),
+    Wait(#[serde(with = "de::duration")] Duration),
     Marker(String),
     Clear,
 }
@@ -443,7 +442,7 @@ enum Command {
 enum Key {
     Char(char),
     Control(char),
-    Wait(#[serde(with = "duration")] Duration),
+    Wait(#[serde(with = "de::duration")] Duration),
 }
 
 trait Merge {
