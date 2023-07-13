@@ -1,4 +1,4 @@
-use std::{iter, mem, thread, time::Duration};
+use std::{io, iter, mem, thread, time::Duration};
 
 use color_eyre::eyre::{self, Context};
 use expectrl::ControlCode;
@@ -201,16 +201,13 @@ impl<Co, Cl> Events<Co, Cl> {
 }
 
 impl Command {
-    fn send(&self, shell_session: &mut ShellSession) -> color_eyre::Result<()> {
+    fn send(&self, shell_session: &mut ShellSession) -> io::Result<()> {
         shell_session.reset();
         match self {
-            Self::SingleLine(line) => shell_session.send_line(line)?,
-            Self::MultiLine(lines) => shell_session.send_line(&lines.join(" "))?,
-            Self::Control(char) => shell_session.send(
-                ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
-            )?,
+            Self::SingleLine(line) => shell_session.send_line(line),
+            Self::MultiLine(lines) => shell_session.send_line(&lines.join(" ")),
+            Self::Control(control) => shell_session.send(control),
         }
-        Ok(())
     }
 
     fn events<'a>(
@@ -240,8 +237,9 @@ impl Command {
                 });
                 CommandEvents::MultiLine(iter)
             }
-            Self::Control(char) => {
-                CommandEvents::Control(type_line(type_speed, ['^', char.to_ascii_uppercase()]))
+            Self::Control(control) => {
+                let control: &str = control.as_ref();
+                CommandEvents::Control(type_line(type_speed, control.chars()))
             }
         }
     }

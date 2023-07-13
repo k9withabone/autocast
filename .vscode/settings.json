@@ -6,6 +6,7 @@
         "bufs",
         "expectrl",
         "itertools",
+        "newtype",
         "outputln",
         "peekable",
         "rcfile",

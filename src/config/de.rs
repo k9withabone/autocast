@@ -24,5 +24,6 @@ macro_rules! map_fields {
     };
 }
 
+pub mod command;
 pub mod duration;
 pub mod shell;

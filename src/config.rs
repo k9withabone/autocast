@@ -13,6 +13,7 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
+use expectrl::ControlCode;
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer};
 
@@ -431,11 +432,17 @@ enum Instruction {
     Clear,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Command {
     SingleLine(String),
     MultiLine(Vec<String>),
-    Control(char),
+    Control(ControlCode),
+}
+
+impl<'de> Deserialize<'de> for Command {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(de::command::Visitor)
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
