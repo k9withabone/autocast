@@ -1,7 +1,6 @@
 use std::{io, iter, mem, thread, time::Duration};
 
-use color_eyre::eyre::{self, Context};
-use expectrl::ControlCode;
+use color_eyre::eyre::Context;
 use itertools::Itertools;
 
 use crate::asciicast::Event;
@@ -287,14 +286,14 @@ where
 }
 
 impl Key {
-    fn send(&self, shell_session: &mut ShellSession) -> color_eyre::Result<()> {
+    fn send(&self, shell_session: &mut ShellSession) -> io::Result<()> {
         match self {
-            Self::Char(char) => shell_session.send([*char as u8])?,
-            Self::Control(char) => shell_session.send(
-                ControlCode::try_from(*char).map_err(|_| eyre::eyre!("invalid control code"))?,
-            )?,
-            Self::Wait(duration) => thread::sleep(*duration),
+            Self::Char(char) => shell_session.send([*char as u8]),
+            Self::Control(control) => shell_session.send(control),
+            Self::Wait(duration) => {
+                thread::sleep(*duration);
+                Ok(())
+            }
         }
-        Ok(())
     }
 }

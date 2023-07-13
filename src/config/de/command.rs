@@ -1,12 +1,13 @@
 use std::fmt;
 
-use itertools::Itertools;
 use serde::{
     de::{self, EnumAccess, SeqAccess, Unexpected, VariantAccess},
     Deserialize,
 };
 
 use crate::config::Command;
+
+use super::{control_from_variant, parse_control};
 
 #[derive(Deserialize)]
 #[serde(variant_identifier)]
@@ -27,12 +28,7 @@ impl<'de> de::Visitor<'de> for Visitor {
 
     fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
         if let Some(control) = v.strip_prefix('^') {
-            let char = control
-                .chars()
-                .exactly_one()
-                .map_err(|_| E::invalid_value(Unexpected::Str(control), &"single control char"))?;
-            let control = char.try_into().map_err(|_| invalid_control(char))?;
-            Ok(Command::Control(control))
+            Ok(Command::Control(parse_control(control)?))
         } else if v.contains('\n') {
             let lines = v.lines().map(String::from).collect();
             Ok(Command::MultiLine(lines))
@@ -73,17 +69,9 @@ impl<'de> de::Visitor<'de> for Visitor {
                 }
             }
             Variant::MultiLine => Ok(Command::MultiLine(variant.newtype_variant()?)),
-            Variant::Control => {
-                let char: char = variant.newtype_variant()?;
-                let control = char.try_into().map_err(|_| invalid_control(char))?;
-                Ok(Command::Control(control))
-            }
+            Variant::Control => Ok(Command::Control(control_from_variant(variant)?)),
         }
     }
-}
-
-fn invalid_control<E: de::Error>(char: char) -> E {
-    E::invalid_value(Unexpected::Char(char), &"valid control char")
 }
 
 #[cfg(test)]

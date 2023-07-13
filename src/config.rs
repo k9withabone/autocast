@@ -445,11 +445,17 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Key {
     Char(char),
-    Control(char),
-    Wait(#[serde(with = "de::duration")] Duration),
+    Control(ControlCode),
+    Wait(Duration),
+}
+
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(de::key::Visitor)
+    }
 }
 
 trait Merge {
