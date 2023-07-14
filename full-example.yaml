@@ -1,0 +1,207 @@
+# full-example.yaml
+# This is a full example of all configuration options for autocast.
+# Most settings have defaults and are not required to be listed.
+
+# All times are specified in seconds (s), milliseconds (ms), or microseconds (us).
+# Use integers and the above abbreviations when specifying,
+# i.e. "1s", "150ms", or "900us".
+
+# Settings for generating the asciicast output.
+# Can be overridden with command-line options.
+settings:
+  # Terminal width, defaults to current terminal width.
+  # Must be an integer.
+  width: 80
+
+  # Terminal height, defaults to current terminal height.
+  # Must be an integer.
+  height: 24
+
+  # Title of the asciicast. Used when uploading to asciinema.
+  # Optional, must be a string.
+  title: autocast full example
+
+  # The shell to use when running instructions.
+  # The default is "bash".
+  # Builtin shell configurations are "bash" and "python".
+  # Contributions for more builtin shell configurations welcome!
+  # Can be a string for a builtin shell configuration,
+  # a map for a custom shell, or a tagged value.
+  # All of the following are valid:
+  # shell: bash
+  # shell: Bash
+  # shell: !Bash
+  # shell: python
+  # shell:
+  #   program: bash
+  #   prompt: "$ "
+  #   line_split: " \"
+  # shell: !Custom
+  #   program: bash
+  #   prompt: "$ "
+  #   line_split: ' \'
+  shell:
+    # The shell program to use.
+    # If a path is not specified, the program's binary will be
+    # located for use in the "SHELL" captured environment variable.
+    # Must be a string/path.
+    program: bash
+    # Arguments to give to the shell program.
+    # Defaults to an empty list.
+    # Must be a list of strings.
+    args:
+      - --rcfile
+      - ~/.bashrc
+    # The shell's prompt.
+    # This MUST match the shell's actual prompt as it used to detect
+    # when a given instruction is finished.
+    # Must be a string.
+    prompt: AUTOCAST_PROMPT
+    # The string to signify a line split in a multiline command.
+    # This is for the purposes of the asciicast output only,
+    # multiline commands are joined by a space before being sent to
+    # the shell process.
+    # Must be a string.
+    line_split: ' \'
+    # The command to give the shell when all instructions are finished.
+    # If not provided the last instruction must cause the shell process
+    # to finish, otherwise autocast will hang waiting for it to finish.
+    # Optional, must be a string.
+    quit_command: exit
+
+  # Environment variables to use in the shell process.
+  # Will be listed in the asciicast's captured environment variables.
+  # The command-line option "--environment" will extend this list.
+  # If there are any duplicates, the last value will take precedent.
+  # Defaults to an empty list.
+  # Must be a list of environment variable pairs.
+  environment:
+    - name: PROMPT_COMMAND
+      value: "PS1=AUTOCAST_PROMPT; unset PROMPT_COMMAND; bind 'set enable-bracketed-paste off'"
+    - name: HELLO_AUTOCAST
+      value: Hello autocast!
+
+  # Environment variables to capture.
+  # Will be listed in the asciicast's captured environment variables.
+  # The command-line option "--environment-capture" will extend this list.
+  # If there are any duplicates with "environment" those will take precedent.
+  # Defaults to "TERM".
+  # Must be a list of strings.
+  environment_capture:
+    - HELLO
+
+  # Default time between key presses when writing commands.
+  # Time format is explained at the beginning of the file.
+  # Defaults to 100ms.
+  type_speed: 100ms
+
+  # The shell prompt to use in the asciicast output.
+  # Note that is just for the purposes of the output.
+  # This is different from the prompt when specifying a custom shell.
+  # Defaults to "$ ".
+  # Must be a string.
+  prompt: "$ "
+
+  # The shell secondary prompt to use in the asciicast output.
+  # Used for multiline commands.
+  # Defaults to "> ".
+  # Must be a string.
+  secondary_prompt: "> "
+
+  # Maximum amount of time waiting for a prompt (max amount of time a
+  # non-interactive command can run, or, for interactive commands, max amount of
+  # time to wait for the prompt after all keys) before autocast returns with an error.
+  # Time format is explained at the beginning of the file.
+  # Defaults to 30s.
+  timeout: 30s
+
+# List of instructions to run and capture for the asciicast output.
+# Each instruction must be tagged with the kind of the instruction.
+# Instruction kinds are: Command, Interactive, Wait, Marker, and Clear.
+instructions:
+  # A !Command instruction's command is sent to the shell process,
+  # then autocast waits for the shell's prompt.
+  - !Command
+    # The command to send to the shell process.
+    # Must be a string (can have multiple lines for multiline commands),
+    # a list of strings (a multiline command),
+    # or a control code (denoted by ^ and its corresponding character, e.g. "^C",
+    # see https://en.wikipedia.org/wiki/C0_and_C1_control_codes#Basic_ASCII_control_codes
+    # for a list).
+    # Optionally, it can be tagged with the kind of command
+    # (SingleLine, MultiLine, or Control).
+    # All of the following are valid:
+    # command: "# Hello!"
+    # command: !SingleLine "# Hello!"
+    # command: |
+    #   echo multiline &&
+    #   echo command
+    # command:
+    # - echo multiline &&
+    # - echo command
+    # command: !MultiLine
+    # - echo multiline &&
+    # - echo command
+    # command: ^C
+    # command: !Control C
+    command: echo $HELLO_AUTOCAST
+    # Whether to hide the command's output from the asciicast output.
+    # If true, then the command will be sent to shell process, but
+    # the output of the command will not be captured.
+    # Default is false.
+    # Must be a bool.
+    hidden: false
+    # Override the default type speed for this command.
+    # Default is null (meaning the default type_speed from settings is used).
+    # Time format is explained at the beginning of the file.
+    type_speed: null
+
+  # An !Interactive instruction's command is sent to the shell process,
+  # each Key in keys is sent, and then autocast waits for the shell's prompt.
+  # After each !Interactive instruction, you MUST ensure the command will finish
+  # and the shell will return to the prompt. Otherwise, autocast will timeout
+  # waiting for the prompt and will return with an error.
+  - !Interactive
+    # The command to send to the shell process.
+    # Same format as for !Command instructions above.
+    command: nano
+    # Keys to send to the shell after the command.
+    # Must be a list.
+    # Each key can be a single character, a control code (like for command),
+    # or a time to wait before sending the next key.
+    # Optionally, each key may be tagged with its kind: Char, Control, or Wait.
+    # All of the following are valid keys:
+    # - a
+    # - !Char a
+    # - ^C
+    # - !Control C
+    # - 500ms
+    # - !Wait 500ms
+    keys:
+      - h
+      - e
+      - l
+      - l
+      - o
+      - 2s
+      - ^X
+      - n
+    # Override the default type speed for this command.
+    # Each key is separated by a wait type_speed long.
+    # Default is null (meaning the default type_speed from settings is used).
+    # Time format is explained at the beginning of the file.
+    type_speed: null
+
+  # A !Wait instruction tells autocast to increase the time from the last
+  # instruction to the next one in the asciicast output.
+  # Time format is explained at the beginning of the file.
+  - !Wait 3s
+
+  # A !Marker instruction adds a marker to the asciicast output at this point.
+  # Markers are chapters that show in asciinema web player.
+  # Must be a string.
+  - !Marker Hello
+
+  # A !Clear instruction adds events to the asciicast output that will clear the
+  # terminal playing the asciicast.
+  - !Clear

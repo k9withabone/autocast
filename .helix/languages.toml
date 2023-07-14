@@ -1,0 +1,11 @@
+[[language]]
+name = "yaml"
+
+[language.config.yaml]
+customTags = [
+  "!Command mapping",
+  "!Interactive mapping",
+  "!Wait scalar",
+  "!Marker scalar",
+  "!Clear",
+]

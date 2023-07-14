@@ -1,1 +1,6 @@
+# Cargo build dir
 /target
+
+# Example asciicast output
+full-example.cast
+example.cast

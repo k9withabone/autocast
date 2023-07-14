@@ -12,5 +12,12 @@
         "rcfile",
         "shlex",
         "thiserror"
+    ],
+    "yaml.customTags": [
+        "!Command mapping",
+        "!Interactive mapping",
+        "!Wait scalar",
+        "!Marker scalar",
+        "!Clear"
     ]
 }
