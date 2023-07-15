@@ -1,4 +1,4 @@
-use std::{io, iter, mem, thread, time::Duration};
+use std::{io, iter, thread, time::Duration};
 
 use color_eyre::eyre::Context;
 use itertools::Itertools;
@@ -7,49 +7,52 @@ use crate::asciicast::Event;
 
 use super::{spawn::ShellSession, Command, Instruction, Key};
 
-pub(super) fn instructions<'a, T: FromIterator<Event>>(
+pub(super) fn instructions<'a>(
     instructions: impl IntoIterator<Item = &'a Instruction>,
     prompt: &str,
     secondary_prompt: &str,
     type_speed: Duration,
     line_split: &str,
     shell_session: &mut ShellSession,
-) -> color_eyre::Result<T> {
+) -> color_eyre::Result<Vec<Event>> {
     instructions
         .into_iter()
-        .scan(Duration::ZERO, |wait_time, instruction| {
-            let events = instruction.run(
+        .map(|instruction| {
+            instruction.run(
                 prompt,
                 secondary_prompt,
                 type_speed,
                 line_split,
                 shell_session,
-            );
-            let events = match events {
-                Ok(events) => events,
-                Err(error) => return Some(Err(error)),
-            };
-            if let Events::Wait(wait) = events {
-                *wait_time += wait;
-            }
-            let mut events = events.peekable();
-            if !wait_time.is_zero() {
-                if let Some(event) = events.peek_mut() {
-                    event.time += mem::take(wait_time);
-                }
-            }
-            Some(Ok(events))
+            )
         })
         .process_results(|events| {
-            iter::once(Event::output(Duration::ZERO, String::from(prompt)))
-                .chain(events.flatten())
+            let mut wait_time = Duration::ZERO;
+            let events = events.flat_map(|mut events| {
+                if let Events::Wait(wait) = events {
+                    wait_time += wait;
+                }
+                let first = events.next().map(|mut event| {
+                    event.time += wait_time;
+                    wait_time = Duration::ZERO;
+                    event
+                });
+                first.into_iter().chain(events)
+            });
+
+            let mut events = iter::once(Event::output(Duration::ZERO, String::from(prompt)))
+                .chain(events)
                 .chain(iter::once(Event::outputln(type_speed)))
                 .scan(Duration::ZERO, |time, mut event| {
                     event.time += *time;
                     *time = event.time;
                     Some(event)
                 })
-                .collect()
+                .collect_vec();
+            if let Some(last) = events.last_mut() {
+                last.time += wait_time;
+            }
+            events
         })
 }
 

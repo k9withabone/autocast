@@ -81,6 +81,8 @@ impl TryFrom<Script> for asciicast::File {
         .wrap_err("error running instructions")?;
         shell_session.quit().wrap_err("could not exit shell")?;
 
+        let duration = events.last().map(|event| event.time);
+
         let mut env: HashMap<_, _> = environment.into_iter().map_into().collect();
         for env_var in environment_capture {
             env.entry(env_var)
@@ -93,7 +95,7 @@ impl TryFrom<Script> for asciicast::File {
                 width,
                 height,
                 timestamp: Some(SystemTime::now()),
-                duration: None,
+                duration,
                 idle_time_limit: None,
                 command: None,
                 title,
