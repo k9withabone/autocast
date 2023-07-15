@@ -154,14 +154,6 @@ impl Serialize for Event {
 }
 
 impl Event {
-    pub fn input(time: Duration, data: String) -> Self {
-        Self {
-            time,
-            event_type: EventType::Input,
-            data,
-        }
-    }
-
     pub fn output(time: Duration, data: String) -> Self {
         Self {
             time,
@@ -189,7 +181,6 @@ impl Event {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventType {
-    Input,
     Output,
     Marker,
 }
@@ -197,7 +188,6 @@ pub enum EventType {
 impl Serialize for EventType {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let event_type = match self {
-            Self::Input => "i",
             Self::Output => "o",
             Self::Marker => "m",
         };
