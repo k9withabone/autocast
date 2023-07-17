@@ -29,6 +29,7 @@ fn main() -> color_eyre::Result<()> {
         .write(true)
         .create_new(!cli.overwrite)
         .create(cli.overwrite)
+        .truncate(true)
         .open(cli.out_file)
         .wrap_err("could not create/open output file")
         .suggestion("use `--overwrite` if you wish to replace an existing file")?;
