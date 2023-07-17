@@ -1,4 +1,7 @@
-use std::{io, iter, thread, time::Duration};
+use std::{
+    io, iter,
+    time::{Duration, Instant},
+};
 
 use color_eyre::eyre::Context;
 use itertools::Itertools;
@@ -127,38 +130,34 @@ fn keys_to_events(
     type_speed: Duration,
     shell_session: &mut ShellSession,
 ) -> color_eyre::Result<Vec<Event>> {
-    let (first, mut prompt_seen) = shell_session.read().wrap_err("could not read from shell")?;
-
-    let output = keys
-        .iter()
-        .map_while(|key| {
-            if prompt_seen {
-                return None;
+    let mut keys = keys.iter();
+    let mut events = Vec::new();
+    let mut next = Instant::now() + type_speed;
+    loop {
+        let (event, prompt) = shell_session
+            .read()
+            .wrap_err("error reading shell output")?;
+        events.extend(event);
+        if prompt {
+            return Ok(events);
+        }
+        if Instant::now() >= next {
+            if let Some(key) = keys.next() {
+                key.send(shell_session).wrap_err("error sending key")?;
+                if let Key::Wait(wait) = key {
+                    next += *wait;
+                }
+                next += type_speed;
+            } else {
+                events.extend(
+                    shell_session
+                        .read_until_prompt()
+                        .wrap_err("could not detect prompt")?,
+                );
+                return Ok(events);
             }
-            let result = key
-                .send(shell_session)
-                .wrap_err("could not send key to shell")
-                .and_then(|_| {
-                    thread::sleep(type_speed);
-                    let (event, prompt) =
-                        shell_session.read().wrap_err("could not read from shell")?;
-                    prompt_seen = prompt;
-                    Ok(event)
-                });
-            Some(result)
-        })
-        .filter_map(Result::transpose);
-    thread::sleep(type_speed);
-    let mut output: Vec<_> = first.map(Ok).into_iter().chain(output).try_collect()?;
-
-    if !prompt_seen {
-        let events = shell_session
-            .read_until_prompt()
-            .wrap_err("could not read prompt from shell")?;
-        output.extend(events);
+        }
     }
-
-    Ok(output)
 }
 
 #[derive(Debug, Clone)]
@@ -293,10 +292,7 @@ impl Key {
         match self {
             Self::Char(char) => shell_session.send([*char as u8]),
             Self::Control(control) => shell_session.send(control),
-            Self::Wait(duration) => {
-                thread::sleep(*duration);
-                Ok(())
-            }
+            Self::Wait(_) => Ok(()),
         }
     }
 }
