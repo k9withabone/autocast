@@ -4,30 +4,50 @@ use std::{
 };
 
 use color_eyre::eyre::Context;
+use indicatif::{MultiProgress, ProgressDrawTarget, ProgressIterator, ProgressStyle};
 use itertools::Itertools;
 
 use crate::asciicast::Event;
 
 use super::{spawn::ShellSession, Command, Instruction, Key};
 
-pub(super) fn instructions<'a>(
-    instructions: impl IntoIterator<Item = &'a Instruction>,
+pub(super) fn instructions<'a, I>(
+    instructions: I,
     prompt: &str,
     secondary_prompt: &str,
     type_speed: Duration,
     line_split: &str,
     shell_session: &mut ShellSession,
-) -> color_eyre::Result<Vec<Event>> {
-    instructions
+) -> color_eyre::Result<Vec<Event>>
+where
+    I: IntoIterator<Item = &'a Instruction>,
+    I::IntoIter: ExactSizeIterator,
+{
+    let mut instructions = instructions
         .into_iter()
-        .map(|instruction| {
-            instruction.run(
-                prompt,
-                secondary_prompt,
-                type_speed,
-                line_split,
-                shell_session,
-            )
+        .progress()
+        .with_style(progress_style())
+        .with_prefix("Instructions");
+
+    let multi_progress = MultiProgress::with_draw_target(ProgressDrawTarget::stdout());
+    instructions.progress = multi_progress.add(instructions.progress);
+    instructions
+        .progress
+        .enable_steady_tick(Duration::from_secs(1));
+
+    instructions
+        .enumerate()
+        .map(|(num, instruction)| {
+            instruction
+                .run(
+                    prompt,
+                    secondary_prompt,
+                    type_speed,
+                    line_split,
+                    shell_session,
+                    &multi_progress,
+                )
+                .wrap_err_with(|| format!("error running instruction {num}"))
         })
         .process_results(|events| {
             let mut wait_time = Duration::ZERO;
@@ -59,6 +79,11 @@ pub(super) fn instructions<'a>(
         })
 }
 
+fn progress_style() -> ProgressStyle {
+    ProgressStyle::with_template("{prefix:>12}: {wide_bar} {pos:>3}/{len:3} [{elapsed}]")
+        .expect("invalid progress style template")
+}
+
 impl Instruction {
     fn run<'a>(
         &'a self,
@@ -67,6 +92,7 @@ impl Instruction {
         default_type_speed: Duration,
         line_split: &'a str,
         shell_session: &mut ShellSession,
+        multi_progress: &MultiProgress,
     ) -> color_eyre::Result<Events<impl Iterator<Item = Event> + 'a, impl Iterator<Item = Event>>>
     {
         match self {
@@ -104,7 +130,7 @@ impl Instruction {
                     .wrap_err("could not send command to shell")?;
 
                 let type_speed = type_speed.map_or(default_type_speed, Into::into);
-                let mut output = keys_to_events(keys, type_speed, shell_session)?;
+                let mut output = keys_to_events(keys, type_speed, shell_session, multi_progress)?;
 
                 output.push(shell_session.new_event(String::from(prompt)));
                 let events = command
@@ -129,8 +155,15 @@ fn keys_to_events(
     keys: &[Key],
     type_speed: Duration,
     shell_session: &mut ShellSession,
+    multi_progress: &MultiProgress,
 ) -> color_eyre::Result<Vec<Event>> {
-    let mut keys = keys.iter();
+    let mut keys = keys
+        .iter()
+        .progress()
+        .with_style(progress_style())
+        .with_prefix("Keys");
+    keys.progress = multi_progress.add(keys.progress);
+
     let mut events = Vec::new();
     let mut next = Instant::now() + type_speed;
     loop {
@@ -141,6 +174,7 @@ fn keys_to_events(
         if prompt {
             return Ok(events);
         }
+        keys.progress.tick();
         if Instant::now() >= next {
             if let Some(key) = keys.next() {
                 key.send(shell_session).wrap_err("error sending key")?;
@@ -149,6 +183,8 @@ fn keys_to_events(
                 }
                 next += type_speed;
             } else {
+                keys.progress.finish_and_clear();
+                multi_progress.remove(&keys.progress);
                 events.extend(
                     shell_session
                         .read_until_prompt()

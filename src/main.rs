@@ -19,10 +19,11 @@ fn main() -> color_eyre::Result<()> {
 
     let cli = Cli::parse();
 
-    let in_file = fs::File::open(cli.in_file).wrap_err("could not open input file")?;
+    let in_file = fs::File::open(&cli.in_file).wrap_err("could not open input file")?;
 
     let mut script = Script::try_from_yaml(BufReader::new(in_file))
         .wrap_err("could not parse input file as Script")?;
+    println!("Read from file: {}", cli.in_file.display());
     script.merge_settings(cli.settings);
 
     let out_file = fs::File::options()
@@ -30,13 +31,14 @@ fn main() -> color_eyre::Result<()> {
         .create_new(!cli.overwrite)
         .create(cli.overwrite)
         .truncate(true)
-        .open(cli.out_file)
+        .open(&cli.out_file)
         .wrap_err("could not create/open output file")
         .suggestion("use `--overwrite` if you wish to replace an existing file")?;
 
     let cast = asciicast::File::try_from(script).wrap_err("error running script")?;
     cast.write(BufWriter::new(out_file))
         .wrap_err("could not write to output file")?;
+    println!(" Wrote to file: {}", cli.out_file.display());
 
     Ok(())
 }
