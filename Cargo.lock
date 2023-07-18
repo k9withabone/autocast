@@ -81,6 +81,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "color-eyre",
+ "console",
  "expectrl",
  "indicatif",
  "itertools",
@@ -89,7 +90,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shlex",
- "terminal_size",
  "thiserror",
  "which",
 ]
@@ -648,16 +648,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "terminal_size"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e6bf6f19e9f8ed8d4048dc22981458ebcf406d67e94cd422e5ecd73d63b3237"
-dependencies = [
- "rustix",
- "windows-sys 0.48.0",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use color_eyre::eyre::{self, Context};
+use console::Term;
 use expectrl::ControlCode;
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer};
@@ -109,14 +110,9 @@ impl TryFrom<Script> for asciicast::File {
 fn terminal_size(width: Option<u16>, height: Option<u16>) -> Option<(u16, u16)> {
     match (width, height) {
         (Some(width), Some(height)) => Some((width, height)),
-        (None, _) | (_, None) => {
-            terminal_size::terminal_size().map(|(terminal_width, terminal_height)| {
-                (
-                    width.unwrap_or(terminal_width.0),
-                    height.unwrap_or(terminal_height.0),
-                )
-            })
-        }
+        (None, _) | (_, None) => Term::stdout()
+            .size_checked()
+            .map(|(rows, columns)| (width.unwrap_or(columns), height.unwrap_or(rows))),
     }
 }
 
