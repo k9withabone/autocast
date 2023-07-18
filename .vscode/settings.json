@@ -5,13 +5,15 @@
         "autocast",
         "bufs",
         "expectrl",
+        "indicatif",
         "itertools",
         "newtype",
         "outputln",
         "peekable",
         "rcfile",
         "shlex",
-        "thiserror"
+        "thiserror",
+        "unalias"
     ],
     "yaml.customTags": [
         "!Command mapping",

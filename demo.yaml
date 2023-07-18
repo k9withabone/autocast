@@ -1,0 +1,71 @@
+# demo.yaml
+# Demo for autocast
+# Also serves as another example for autocast.
+# See example.yaml and full-example.yaml for more.
+
+settings:
+  width: 105
+  height: 36
+  title: autocast v0.1.0 demo
+  environment:
+    - name: HELLO
+      value: Hello autocast!
+  timeout: 90s
+
+instructions:
+  # Setup
+  - !Command
+    command: cargo build --release
+    hidden: true
+  - !Command
+    command: alias autocast=target/release/autocast
+    hidden: true
+
+  - !Marker Introduction
+  - !Command
+    command: "# Welcome to autocast!"
+  - !Command
+    command: "# Autocast helps you automate terminal demos."
+  - !Command
+    command: "# It takes a YAML file with your instructions and generates an asciicast file for use with asciinema."
+  - !Wait 3s
+  - !Clear
+
+  - !Marker Help
+  - !Command
+    command: "autocast -h"
+  - !Wait 5s
+  - !Clear
+
+  - !Marker Example
+  - !Command
+    command: "# Let's see an example of how autocast works."
+  - !Command
+    command: "# This is the example input YAML file we will be using."
+  - !Command
+    command: cat example.yaml
+  - !Wait 5s
+  - !Command
+    command: "# Now let's generate the asciicast file!"
+  - !Command
+    command: autocast example.yaml example.cast
+  - !Command
+    command: "# That's it! The asciicast file can be played with asciinema."
+
+  - !Marker Play Example
+  - !Command
+    command: asciinema play example.cast
+  - !Wait 2s
+
+  - !Marker End
+  - !Command
+    command: "# Thank you for watching!"
+  - !Wait 3s
+
+  # Cleanup
+  - !Command
+    command: rm example.cast
+    hidden: true
+  - !Command
+    command: unalias autocast
+    hidden: true

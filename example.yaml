@@ -1,0 +1,33 @@
+# example.yaml
+# Short example input file for autocast.
+# See full-example.yaml for all possible configuration options and explanations.
+
+settings:
+  title: autocast example
+  environment:
+    - name: GOODBYE
+      value: Goodbye!
+  environment_capture:
+    - HELLO
+  prompt: "[example]$ "
+
+instructions:
+  - !Command
+    command: echo $HELLO
+  - !Wait 2s
+  - !Interactive
+    command: nano
+    keys:
+      - 2s
+      - h
+      - e
+      - l
+      - l
+      - o
+      - 2s
+      - ^X
+      - 1s
+      - n
+  - !Command
+    command: echo $GOODBYE
+  - !Wait 2s
