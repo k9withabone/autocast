@@ -3,6 +3,7 @@ mod run;
 mod spawn;
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     ffi::OsStr,
     fmt::{self, Display},
@@ -314,10 +315,18 @@ impl Display for Shell {
         match self {
             Self::Bash => f.write_str("bash"),
             Self::Python => f.write_str("python"),
-            Self::Custom { program, args, .. } => {
-                let command = iter::once(program).chain(args).map(String::as_str);
-                f.write_str(&shlex::join(command))
-            }
+            Self::Custom { program, args, .. } => f.write_str(
+                &iter::once(program)
+                    .chain(args)
+                    .map(|arg| {
+                        if arg.contains(char::is_whitespace) {
+                            Cow::Owned(format!("\"{arg}\""))
+                        } else {
+                            Cow::Borrowed(arg)
+                        }
+                    })
+                    .join(" "),
+            ),
         }
     }
 }

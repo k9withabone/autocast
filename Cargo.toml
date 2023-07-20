@@ -16,6 +16,5 @@ os_str_bytes = { version = "6.5.1", default-features = false }
 serde = { version = "1.0.164", features = ["derive"] }
 serde_json = "1.0.97"
 serde_yaml = "0.9.22"
-shlex = "1.1.0"
 thiserror = "1.0.40"
 which = "4.4.0"
