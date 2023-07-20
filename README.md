@@ -1,5 +1,9 @@
 # autocast
 
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/k9withabone/autocast/format-clippy-test.yaml?style=flat-square&logo=github&label=ci)](https://github.com/k9withabone/autocast/actions/workflows/format-clippy-test.yaml)
+[![Crates.io](https://img.shields.io/crates/v/autocast?style=flat-square)](https://crates.io/crates/autocast)
+[![License](https://img.shields.io/crates/l/autocast?style=flat-square)](./LICENSE)
+
 A tool to help automate the creation of terminal demos. Automatically generate an asciicast file for use with [asciinema](https://asciinema.org/).
 
 [![demo](./demo.gif)](https://asciinema.org/a/597756)
