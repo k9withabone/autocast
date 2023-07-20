@@ -1,4 +1,6 @@
 #![warn(clippy::pedantic)]
+#![warn(clippy::cargo)]
+#![allow(clippy::multiple_crate_versions)]
 
 mod asciicast;
 mod config;
