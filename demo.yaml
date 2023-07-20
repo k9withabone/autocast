@@ -5,7 +5,7 @@
 
 settings:
   width: 105
-  height: 36
+  height: 37
   title: autocast v0.1.0 demo
   environment:
     - name: HELLO

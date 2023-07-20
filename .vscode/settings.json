@@ -3,6 +3,7 @@
         "asciicast",
         "asciinema",
         "autocast",
+        "binstall",
         "bufs",
         "expectrl",
         "indicatif",
@@ -11,7 +12,6 @@
         "outputln",
         "peekable",
         "rcfile",
-        "shlex",
         "thiserror",
         "unalias"
     ],
@@ -21,5 +21,12 @@
         "!Wait scalar",
         "!Marker scalar",
         "!Clear"
+    ],
+    "languageToolLinter.languageTool.ignoredWordsInWorkspace": [
+        "asciicast",
+        "asciinema",
+        "autocast",
+        "cargo-binstall",
+        "expectrl"
     ]
 }
