@@ -14,6 +14,7 @@ use super::{control_from_variant, duration, parse_control};
 #[serde(variant_identifier)]
 enum Variant {
     Char,
+    Str,
     Control,
     Wait,
 }
@@ -34,6 +35,8 @@ impl<'de> de::Visitor<'de> for Visitor {
     fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
         if let Some(control) = v.strip_prefix('^') {
             Ok(Key::Control(parse_control(control)?))
+        } else if let Some(str) = v.strip_prefix("!Str ") {
+            Ok(Key::String(str.to_string()))
         } else if let Ok(char) = v.chars().exactly_one() {
             Ok(Key::Char(char))
         } else {
@@ -46,6 +49,7 @@ impl<'de> de::Visitor<'de> for Visitor {
         let (tag, variant) = data.variant()?;
         match tag {
             Variant::Char => Ok(Key::Char(variant.newtype_variant()?)),
+            Variant::Str => Ok(Key::String(variant.newtype_variant()?)),
             Variant::Control => Ok(Key::Control(control_from_variant(variant)?)),
             Variant::Wait => {
                 let wait: &str = variant.newtype_variant()?;

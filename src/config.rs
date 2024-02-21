@@ -455,6 +455,7 @@ impl<'de> Deserialize<'de> for Command {
 #[derive(Debug, Clone, PartialEq)]
 enum Key {
     Char(char),
+    String(String),
     Control(ControlCode),
     Wait(Duration),
 }
