@@ -327,6 +327,11 @@ impl Key {
     fn send(&self, shell_session: &mut ShellSession) -> io::Result<()> {
         match self {
             Self::Char(char) => shell_session.send([*char as u8]),
+
+            Self::String(str) => str
+                .chars()
+                .map(|char| shell_session.send([char as u8]))
+                .collect::<io::Result<()>>(),
             Self::Control(control) => shell_session.send(control),
             Self::Wait(_) => Ok(()),
         }
